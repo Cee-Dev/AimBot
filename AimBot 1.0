@@ -4,7 +4,7 @@ local cam = workspace.CurrentCamera
 local rs = game:GetService("RunService")
 
 local aiming = false
-local fovEnabled = true -- Toggle state for FOV circle
+local fovEnabled = true
 local fovRadius = 150
 
 -- FOV Circle
@@ -17,26 +17,46 @@ fovCircle.Transparency = 0.6
 fovCircle.Visible = true
 fovCircle.Filled = false
 
--- Find closest head (fully compatible with R6 and R15)
 local function getClosest()
     local closest = nil
     local shortest = math.huge
     
+    local myTeam = plr.TeamColor
+    local myHead = plr.Character and plr.Character:FindFirstChild("Head")
+    if not myHead then return nil end
+    local origin = myHead.Position
+
     for _, v in pairs(game.Players:GetPlayers()) do
+        -- Skip self, dead, or missing character
         if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+            -- Ignore teammates
+            if v.TeamColor == myTeam then continue end
+            
             local head = v.Character:FindFirstChild("Head")
             if head then
                 local screenPos, onScreen = cam:WorldToViewportPoint(head.Position)
                 if onScreen then
                     local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - fovCircle.Position).Magnitude
-                    
-                    -- Find our own head
-                    local myHead = plr.Character and plr.Character:FindFirstChild("Head")
-                    local dist3D = myHead and (head.Position - myHead.Position).Magnitude or math.huge
+                    local dist3D = (head.Position - origin).Magnitude
                     
                     if distFromCenter <= fovRadius and dist3D < shortest then
-                        shortest = dist3D
-                        closest = head
+                        -- Occlusion Check
+                        local direction = (head.Position - origin)
+                        local rayParams = Ray.new(origin, direction * 1.1) -- Slight overshoot to ensure hit
+                        local filter = {
+                            [v.Character] = true,
+                            [plr.Character] = true
+                        }
+                        local hit = workspace:Raycast(rayParams, filter)
+                        
+                        -- If hit is nil or the hit part belongs to the target, it's clear
+                        if hit and hit.Instance:IsDescendantOf(v.Character) and hit.Instance.Name == "Head" then
+                            shortest = dist3D
+                            closest = head
+                        elseif not hit then
+                            shortest = dist3D
+                            closest = head
+                        end
                     end
                 end
             end
@@ -49,18 +69,13 @@ end
 uis.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     
-    -- Toggle Aiming (Q)
     if input.KeyCode == Enum.KeyCode.Q then
         aiming = true
     end
-    
-    -- Toggle FOV Circle (-)
     if input.KeyCode == Enum.KeyCode.Minus then
         fovEnabled = not fovEnabled
         fovCircle.Visible = fovEnabled
     end
-    
-    -- Toggle Aiming Logic (=)
     if input.KeyCode == Enum.KeyCode.Equals then
         aiming = not aiming
     end
@@ -72,12 +87,9 @@ uis.InputEnded:Connect(function(input)
     end
 end)
 
--- Main loop
 rs.RenderStepped:Connect(function()
-    -- Update FOV position
     fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     
-    -- Aiming Logic
     if aiming then
         local target = getClosest()
         if target then
