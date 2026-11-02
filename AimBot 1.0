@@ -5,6 +5,8 @@ local rs = game:GetService("RunService")
 
 local aiming = false
 local fovEnabled = true
+local charmEnabled = true
+local aimBody = false -- false = Head, true = Body
 local fovRadius = 150
 
 -- FOV Circle
@@ -17,52 +19,92 @@ fovCircle.Transparency = 0.6
 fovCircle.Visible = true
 fovCircle.Filled = false
 
-local function getClosest()
-    local closest = nil
-    local shortest = math.huge
-    
+local highlightedPlayers = {}
+
+local function getTargetPosition(character)
+    if aimBody then
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp.Position end
+    end
+    local head = character:FindFirstChild("Head")
+    if head then return head.Position end
+    return nil
+end
+
+local function getValidTargets()
+    local targets = {}
     local myTeam = plr.TeamColor
     local myHead = plr.Character and plr.Character:FindFirstChild("Head")
-    if not myHead then return nil end
+    if not myHead then return targets end
     local origin = myHead.Position
 
     for _, v in pairs(game.Players:GetPlayers()) do
-        -- Skip self, dead, or missing character
         if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
-            -- Ignore teammates
             if v.TeamColor == myTeam then continue end
             
-            local head = v.Character:FindFirstChild("Head")
-            if head then
-                local screenPos, onScreen = cam:WorldToViewportPoint(head.Position)
+            local targetPart = getTargetPosition(v.Character)
+            if targetPart then
+                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart)
                 if onScreen then
                     local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - fovCircle.Position).Magnitude
-                    local dist3D = (head.Position - origin).Magnitude
-                    
-                    if distFromCenter <= fovRadius and dist3D < shortest then
-                        -- Occlusion Check
-                        local direction = (head.Position - origin)
-                        local rayParams = Ray.new(origin, direction * 1.1) -- Slight overshoot to ensure hit
-                        local filter = {
-                            [v.Character] = true,
-                            [plr.Character] = true
-                        }
-                        local hit = workspace:Raycast(rayParams, filter)
-                        
-                        -- If hit is nil or the hit part belongs to the target, it's clear
-                        if hit and hit.Instance:IsDescendantOf(v.Character) and hit.Instance.Name == "Head" then
-                            shortest = dist3D
-                            closest = head
-                        elseif not hit then
-                            shortest = dist3D
-                            closest = head
-                        end
+                    local dist3D = (targetPart - origin).Magnitude
+                    if distFromCenter <= fovRadius then
+                        table.insert(targets, {player = v, pos = targetPart, dist = dist3D})
                     end
                 end
             end
         end
     end
-    return closest
+    return targets
+end
+
+local function setCharm(player, active)
+    if not player or not player.Character then return end
+    local char = player.Character
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and not part:FindFirstChildWhichIsA("Highlight") then
+            if active then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = Color3.fromRGB(255, 0, 0)
+                hl.OutlineColor = Color3.fromRGB(255, 0, 0)
+                hl.FillTransparency = 0.5
+                hl.OutlineTransparency = 0.2
+                hl.Parent = part
+            end
+        end
+    end
+end
+
+local function clearCharm(player)
+    if not player or not player.Character then return end
+    for _, hl in pairs(player.Character:GetDescendants()) do
+        if hl:IsA("Highlight") then
+            hl:Destroy()
+        end
+    end
+end
+
+local function updateCharm(targets)
+    local activePlayers = {}
+    for _, t in ipairs(targets) do
+        activePlayers[t.player] = true
+    end
+    
+    -- Remove highlights from players no longer in targets
+    for p, _ in pairs(highlightedPlayers) do
+        if not activePlayers[p] then
+            clearCharm(p)
+            highlightedPlayers[p] = nil
+        end
+    end
+    
+    -- Add highlights to new targets
+    for p, _ in pairs(activePlayers) do
+        if not highlightedPlayers[p] then
+            setCharm(p, true)
+            highlightedPlayers[p] = true
+        end
+    end
 end
 
 -- Input Handling
@@ -79,6 +121,18 @@ uis.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.Equals then
         aiming = not aiming
     end
+    if input.KeyCode == Enum.KeyCode.RightBracket then
+        charmEnabled = not charmEnabled
+        if not charmEnabled then
+            for p, _ in pairs(highlightedPlayers) do
+                clearCharm(p)
+            end
+            highlightedPlayers = {}
+        end
+    end
+    if input.KeyCode == Enum.KeyCode.LeftBracket then
+        aimBody = not aimBody
+    end
 end)
 
 uis.InputEnded:Connect(function(input)
@@ -90,10 +144,31 @@ end)
 rs.RenderStepped:Connect(function()
     fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
     
+    local targets = getValidTargets()
+    
     if aiming then
-        local target = getClosest()
-        if target then
-            cam.CFrame = CFrame.new(cam.CFrame.Position, target.Position)
+        -- Aim at closest target
+        local closest = nil
+        local shortest = math.huge
+        for _, t in ipairs(targets) do
+            if t.dist < shortest then
+                shortest = t.dist
+                closest = t
+            end
         end
+        
+        if closest then
+            cam.CFrame = CFrame.new(cam.CFrame.Position, closest.pos)
+        end
+    end
+    
+    -- Charm Logic
+    if charmEnabled then
+        updateCharm(targets)
+    else
+        for p, _ in pairs(highlightedPlayers) do
+            clearCharm(p)
+        end
+        highlightedPlayers = {}
     end
 end)
