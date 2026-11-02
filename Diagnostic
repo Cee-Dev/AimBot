@@ -1,47 +1,58 @@
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
-print("--- DIAGNOSTIC START ---")
-print("Game Name: " .. game.Name)
-print("Local Player: " .. LocalPlayer.Name)
-print("Team: " .. (LocalPlayer.Team and LocalPlayer.Team.Name or "None"))
-print("TeamColor: " .. LocalPlayer.TeamColor)
-print("Character: " .. (LocalPlayer.Character and LocalPlayer.Character.Name or "None"))
+local function safePrint(...)
+    print(...)
+end
+
+safePrint("========================================")
+safePrint("   UNIVERSAL AIMBOT DIAGNOSTIC TOOL")
+safePrint("========================================")
+safePrint("Game: " .. game.Name)
+safePrint("Local Player: " .. LocalPlayer.Name)
+safePrint("Team: " .. (LocalPlayer.Team and LocalPlayer.Team.Name or "None"))
+safePrint("TeamColor: " .. tostring(LocalPlayer.TeamColor))
+safePrint("Character: " .. (LocalPlayer.Character and LocalPlayer.Character.Name or "None"))
 
 if LocalPlayer.Character then
-    print("\n--- CHARACTER STRUCTURE ---")
+    safePrint("\n--- LOCAL CHARACTER STRUCTURE ---")
+    local count = 0
     for _, desc in pairs(LocalPlayer.Character:GetDescendants()) do
         if desc:IsA("BasePart") or desc:IsA("Model") or desc:IsA("Humanoid") then
-            print(string.format("Class: %-12s | Name: %-20s | Parent: %-20s", 
+            safePrint(string.format("Class: %-12s | Name: %-20s | Parent: %-20s", 
                 desc.ClassName, 
                 desc.Name, 
                 (desc.Parent and desc.Parent.Name or "Workspace")
             ))
+            count += 1
+            if count >= 20 then break end -- Limit output
         end
     end
 end
 
-print("\n--- OTHER PLAYERS ---")
+safePrint("\n--- OTHER PLAYERS ---")
 for _, p in pairs(Players:GetPlayers()) do
     if p ~= LocalPlayer and p.Character then
-        print(string.format("\nPlayer: %-15s | Team: %-10s | TeamColor: %-10s", 
+        safePrint(string.format("\nPlayer: %-15s | Team: %-10s | TeamColor: %-10s", 
             p.Name, 
             (p.Team and p.Team.Name or "None"), 
-            p.TeamColor
+            tostring(p.TeamColor)
         ))
         
-        -- Print first 5 base parts of this player
         local count = 0
         for _, desc in pairs(p.Character:GetDescendants()) do
             if desc:IsA("BasePart") then
-                print(string.format("   Part: %-20s | Pos: %.1f, %.1f, %.1f", 
+                safePrint(string.format("   Part: %-20s | Pos: %.1f, %.1f, %.1f", 
                     desc.Name, 
                     desc.Position.X, desc.Position.Y, desc.Position.Z
                 ))
                 count += 1
-                if count >= 5 then break end
+                if count >= 5 then break end -- Limit output per player
             end
         end
     end
 end
-print("--- DIAGNOSTIC END ---")
+
+safePrint("========================================")
+safePrint("   DIAGNOSTIC COMPLETE")
+safePrint("========================================")
