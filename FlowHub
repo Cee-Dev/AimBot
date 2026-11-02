@@ -1,0 +1,389 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local DataStoreService = game:GetService("DataStoreService")
+
+local player = Players.LocalPlayer
+local cam = workspace.CurrentCamera
+
+-- ============================================================================
+-- CONFIGURATION
+-- ============================================================================
+local CONFIG = {
+    THEME = {
+        bg = Color3.fromRGB(12, 12, 12),
+        bgDark = Color3.fromRGB(0, 0, 0),
+        border = Color3.fromRGB(41, 41, 41),
+        accent = Color3.fromRGB(68, 162, 249),
+        text = Color3.fromRGB(240, 240, 240),
+        textDim = Color3.fromRGB(120, 120, 120),
+        hover = Color3.fromRGB(30, 30, 30),
+        success = Color3.fromRGB(46, 204, 113),
+        danger = Color3.fromRGB(231, 76, 60)
+    },
+    TOGGLE_KEY = Enum.KeyCode.Tilde,
+    FONT = "Poppins",
+    FONT_SIZE = 14
+}
+
+-- ============================================================================
+-- STATE MANAGEMENT (Syncs Logic + UI)
+-- ============================================================================
+local State = {
+    UIVisible = true,
+    Aiming = false,
+    FOVEnabled = true,
+    CharmEnabled = true,
+    AimBody = false,
+    FOVRadius = 150, -- Default FOV
+    CurrentTab = "HOME",
+    Scripts = {},
+    ClientData = {}
+}
+
+-- ============================================================================
+-- CORE COMBAT LOGIC (Original Script Logic)
+-- ============================================================================
+local fovCircle = Drawing.new("Circle")
+fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+fovCircle.Radius = State.FOVRadius
+fovCircle.Color = CONFIG.THEME.accent
+fovCircle.Thickness = 1
+fovCircle.Transparency = 0.6
+fovCircle.Visible = State.FOVEnabled
+fovCircle.Filled = false
+
+local highlightedPlayers = {}
+local currentTargets = {}
+
+local function getTargetPart(character)
+    if State.AimBody then
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp end
+    end
+    local head = character:FindFirstChild("Head")
+    if head then return head end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getValidTargets()
+    local targets = {}
+    local myTeam = player.TeamColor
+    local myHead = player.Character and player.Character:FindFirstChild("Head")
+    if not myHead then return targets end
+    local origin = myHead.Position
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    for _, v in pairs(Players:GetPlayers()) do
+        if v ~= player and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+            if v.TeamColor == myTeam then continue end
+            
+            local targetPart = getTargetPart(v.Character)
+            if targetPart then
+                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+                if onScreen then
+                    local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                    local dist3D = (targetPart.Position - origin).Magnitude
+                    if distFromCenter <= State.FOVRadius then
+                        table.insert(targets, {
+                            player = v, 
+                            part = targetPart, 
+                            screenDist = distFromCenter,
+                            dist3D = dist3D
+                        })
+                    end
+                end
+            end
+        end
+    end
+    return targets
+end
+
+local function setCharm(player, active)
+    if not player or not player.Character then return end
+    local char = player.Character
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and not part:FindFirstChildWhichIsA("Highlight") then
+            if active then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = CONFIG.THEME.accent
+                hl.OutlineColor = CONFIG.THEME.accent
+                hl.FillTransparency = 0.5
+                hl.OutlineTransparency = 0.2
+                hl.Parent = part
+            end
+        end
+    end
+end
+
+local function clearCharm(player)
+    if not player or not player.Character then return end
+    for _, hl in pairs(player.Character:GetDescendants()) do
+        if hl:IsA("Highlight") then hl:Destroy() end
+    end
+end
+
+local function updateCharm(targets)
+    local activePlayers = {}
+    for _, t in ipairs(targets) do activePlayers[t.player] = true end
+    
+    for p, _ in pairs(highlightedPlayers) do
+        if not activePlayers[p] then
+            clearCharm(p)
+            highlightedPlayers[p] = nil
+        end
+    end
+    
+    for p, _ in pairs(activePlayers) do
+        if not highlightedPlayers[p] then
+            setCharm(p, true)
+            highlightedPlayers[p] = true
+        end
+    end
+end
+
+-- Input Handling
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.Q then State.Aiming = true end
+    if input.KeyCode == Enum.KeyCode.Minus then State.FOVEnabled = not State.FOVEnabled; fovCircle.Visible = State.FOVEnabled end
+    if input.KeyCode == Enum.KeyCode.Equals then State.Aiming = not State.Aiming end
+    if input.KeyCode == Enum.KeyCode.RightBracket then 
+        State.CharmEnabled = not State.CharmEnabled
+        if not State.CharmEnabled then
+            for p, _ in pairs(highlightedPlayers) do clearCharm(p) end
+            highlightedPlayers = {}
+        end
+    end
+    if input.KeyCode == Enum.KeyCode.LeftBracket then State.AimBody = not State.AimBody end
+    if input.KeyCode == CONFIG.TOGGLE_KEY then State.UIVisible = not State.UIVisible end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.Q then State.Aiming = false end
+end)
+
+RunService.RenderStepped:Connect(function()
+    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+    fovCircle.Radius = State.FOVRadius
+    
+    local targets = getValidTargets()
+    currentTargets = targets
+    
+    if State.Aiming then
+        local closest = nil
+        local shortestScreenDist = math.huge
+        for _, t in ipairs(targets) do
+            if t.screenDist < shortestScreenDist then
+                shortestScreenDist = t.screenDist
+                closest = t
+            end
+        end
+        if closest then
+            cam.CFrame = CFrame.new(cam.CFrame.Position, closest.part.Position)
+        end
+    end
+    
+    if State.CharmEnabled then
+        updateCharm(targets)
+    else
+        for p, _ in pairs(highlightedPlayers) do clearCharm(p) end
+        highlightedPlayers = {}
+    end
+end)
+
+-- ============================================================================
+-- UI ENGINE: FLOWHUB
+-- ============================================================================
+
+local function CreateUI()
+    local root = Instance.new("SurfaceGui")
+    root.Name = "FlowHub"
+    root.ResetOnSpawn = false
+    root.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    root.Parent = player:WaitForChild("PlayerGui")
+
+    local rootFrame = Instance.new("Frame", root)
+    rootFrame.Name = "RootFrame"
+    rootFrame.BackgroundColor3 = CONFIG.THEME.bg
+    rootFrame.BorderSizePixel = 0
+    rootFrame.Position = UDim2.new(0.5, -350, 0.5, -250)
+    rootFrame.Size = UDim2.fromOffset(700, 500)
+    rootFrame.Active = true
+    rootFrame.Draggable = true
+    rootFrame.Visible = State.UIVisible
+    rootFrame.CornerRadius = UDim.new(0, 6)
+
+    local corner = Instance.new("UICorner", rootFrame)
+    corner.CornerRadius = UDim.new(0, 6)
+    
+    local stroke = Instance.new("UIStroke", rootFrame)
+    stroke.Color = CONFIG.THEME.border
+    stroke.Thickness = 1
+
+    local pad = Instance.new("UIPadding", rootFrame)
+    pad.PaddingTop = UDim.new(0, 40)
+
+    -- Title Bar
+    local titleBar = Instance.new("Frame", rootFrame)
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.fromScale(1, 0.08)
+    titleBar.BackgroundColor3 = CONFIG.THEME.bgDark
+    titleBar.BorderSizePixel = 0
+
+    local logo = Instance.new("TextLabel", titleBar)
+    logo.Text = "◉ FlowHub"
+    logo.TextColor3 = CONFIG.THEME.accent
+    logo.Font = Enum.Font.GothamBold
+    logo.TextSize = 16
+    logo.Size = UDim2.new(0, 120, 1, 0)
+    logo.Position = UDim2.new(0, 10, 0, 0)
+    logo.BackgroundTransparency = 1
+
+    local controls = Instance.new("Frame", titleBar)
+    controls.Size = UDim2.new(0, 100, 1, 0)
+    controls.Position = UDim2.new(1, -110, 0, 0)
+    controls.BackgroundTransparency = 1
+
+    local function createBtn(text, pos)
+        local btn = Instance.new("TextButton", controls)
+        btn.Text = text
+        btn.TextColor3 = CONFIG.THEME.textDim
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 12
+        btn.Size = UDim2.fromOffset(30, 20)
+        btn.Position = pos
+        btn.BackgroundTransparency = 1
+        btn.MouseButton1Click:Connect(function()
+            if text == "—" then rootFrame.Size = UDim2.fromOffset(0, 0)
+            elseif text == "□" then rootFrame.Size = UDim2.fromOffset(1000, 700)
+            else rootFrame.Visible = not rootFrame.Visible end
+        end)
+        btn.MouseEnter:Connect(function() btn.TextColor3 = CONFIG.THEME.accent end)
+        btn.MouseLeave:Connect(function() btn.TextColor3 = CONFIG.THEME.textDim end)
+        return btn
+    end
+    createBtn("—", UDim2.new(0, 0, 0.5, -10))
+    createBtn("□", UDim2.new(0, 35, 0.5, -10))
+    createBtn("✕", UDim2.new(0, 70, 0.5, -10))
+
+    -- Main Content
+    local main = Instance.new("Frame", rootFrame)
+    main.Size = UDim2.new(1, 0, 1, -40)
+    main.Position = UDim2.new(0, 0, 0, 40)
+    main.BackgroundTransparency = 1
+
+    local sidebar = Instance.new("Frame", main)
+    sidebar.Name = "Sidebar"
+    sidebar.Size = UDim2.new(0, 220, 1, 0)
+    sidebar.BackgroundColor3 = CONFIG.THEME.bgDark
+    sidebar.BorderSizePixel = 0
+
+    local content = Instance.new("Frame", main)
+    content.Name = "Content"
+    content.Size = UDim2.new(1, -220, 1, 0)
+    content.Position = UDim2.new(0, 220, 0, 0)
+    content.BackgroundTransparency = 1
+
+    -- Sidebar Tabs
+    local sidebarTabs = Instance.new("Frame", sidebar)
+    sidebarTabs.Size = UDim2.new(1, 0, 0, 200)
+    sidebarTabs.Position = UDim2.new(0, 0, 0, 10)
+    sidebarTabs.BackgroundTransparency = 1
+    local sidebarLayout = Instance.new("UIListLayout", sidebarTabs)
+    sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local tabs = {"HOME", "EDITOR", "SCRIPTS", "CLIENTS", "SETTINGS"}
+    local tabIcons = {"⌂", "✎", "📁", "👥", "⚙"}
+    local tabFrames = {}
+
+    for i, t in ipairs(tabs) do
+        local tab = Instance.new("TextButton", sidebarTabs)
+        tab.Name = t
+        tab.Text = tabIcons[i] .. "  " .. t
+        tab.TextColor3 = CONFIG.THEME.textDim
+        tab.Font = Enum.Font.GothamMedium
+        tab.TextSize = 13
+        tab.Size = UDim2.new(1, -10, 0, 36)
+        tab.Position = UDim2.new(0, 5, 0, (i-1)*40)
+        tab.BackgroundColor3 = CONFIG.THEME.bg
+        tab.AutoButtonColor = false
+        tab.LayoutOrder = i
+        tab.CornerRadius = UDim.new(0, 4)
+        tab.MouseButton1Click:Connect(function()
+            State.CurrentTab = t
+            for _, f in pairs(tabFrames) do
+                f.BackgroundColor3 = (f.Name == t) and CONFIG.THEME.accent:lerp(CONFIG.THEME.bg, 0.8) or CONFIG.THEME.bg
+                f.TextColor3 = (f.Name == t) and CONFIG.THEME.text or CONFIG.THEME.textDim
+            end
+            if content:FindFirstChild(t) then
+                content:FindFirstChild(t).Visible = true
+                for _, v in pairs(content:GetChildren()) do
+                    if v:IsA("Frame") and v.Name ~= t then v.Visible = false end
+                end
+            end
+        end)
+        tabFrames[t] = tab
+    end
+
+    -- Tab Containers
+    local function createTab(name)
+        local f = Instance.new("Frame", content)
+        f.Name = name
+        f.Size = UDim2.fromScale(1, 1)
+        f.BackgroundTransparency = 1
+        f.Visible = (name == State.CurrentTab)
+        return f
+    end
+
+    -- 1. HOME TAB
+    local homeTab = createTab("HOME")
+    local subCard = Instance.new("Frame", homeTab)
+    subCard.Size = UDim2.new(0.45, -10, 0.4, -10)
+    subCard.Position = UDim2.new(0.05, 0, 0.05, 0)
+    subCard.BackgroundColor3 = CONFIG.THEME.bgDark
+    subCard.BorderSizePixel = 0
+    local subTitle = Instance.new("TextLabel", subCard)
+    subTitle.Text = "PRO SUBSCRIPTION\n\n• Unlimited Scripts\n• Priority Support\n• Early Access"
+    subTitle.TextColor3 = CONFIG.THEME.text
+    subTitle.Font = Enum.Font.GothamMedium
+    subTitle.TextSize = 14
+    subTitle.Size = UDim2.fromScale(1, 1)
+    subTitle.BackgroundTransparency = 1
+
+    -- 2. EDITOR TAB
+    local editorTab = createTab("EDITOR")
+    local editorInput = Instance.new("TextBox", editorTab)
+    editorInput.Size = UDim2.new(1, -20, 0.7, -10)
+    editorInput.Position = UDim2.new(0.05, 0, 0.05, 0)
+    editorInput.BackgroundColor3 = CONFIG.THEME.bgDark
+    editorInput.TextColor3 = CONFIG.THEME.text
+    editorInput.Font = Enum.Font.Code
+    editorInput.TextSize = 12
+    editorInput.PlaceholderText = "Paste your Luau script here..."
+    editorInput.TextWrapped = true
+    editorInput.MultiLine = true
+
+    local actionBar = Instance.new("Frame", editorTab)
+    actionBar.Size = UDim2.new(1, -20, 0, 40)
+    actionBar.Position = UDim2.new(0.05, 0, 0.8, 0)
+    actionBar.BackgroundTransparency = 1
+
+    local execBtn = Instance.new("TextButton", actionBar)
+    execBtn.Text = "▶ Execute"
+    execBtn.BackgroundColor3 = CONFIG.THEME.accent
+    execBtn.TextColor3 = CONFIG.THEME.bgDark
+    execBtn.Font = Enum.Font.GothamBold
+    execBtn.TextSize = 14
+    execBtn.Size = UDim2.new(0, 100, 1, 0)
+    execBtn.CornerRadius = UDim.new(0, 4)
+    execBtn.MouseButton1Click:Connect(function()
+        local code = editorInput.Text
+        if code ~= "" then
+            local ok, err = loadstring(code)()
+            if not ok then print("[FlowHub] Script Error: " .. err) end
+        end
+    end)
+
+    -- 3. SETTINGS TAB (Includes FOV Controls)
