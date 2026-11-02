@@ -5,6 +5,7 @@ local rs = game:GetService("RunService")
 
 local aiming = false
 local fovEnabled = true
+local charmEnabled = true
 local fovRadius = 150
 
 -- FOV Circle
@@ -17,20 +18,19 @@ fovCircle.Transparency = 0.6
 fovCircle.Visible = true
 fovCircle.Filled = false
 
+local currentTarget = nil
+
 local function getClosest()
     local closest = nil
     local shortest = math.huge
     
     local myTeam = plr.TeamColor
-    local myChar = plr.Character
-    local myHead = myChar and myChar:FindFirstChild("Head")
+    local myHead = plr.Character and plr.Character:FindFirstChild("Head")
     if not myHead then return nil end
     local origin = myHead.Position
 
     for _, v in pairs(game.Players:GetPlayers()) do
-        -- Skip self, dead, or missing character
         if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
-            -- Ignore teammates
             if v.TeamColor == myTeam then continue end
             
             local head = v.Character:FindFirstChild("Head")
@@ -41,38 +41,41 @@ local function getClosest()
                     local dist3D = (head.Position - origin).Magnitude
                     
                     if distFromCenter <= fovRadius and dist3D < shortest then
-                        -- Occlusion Check
-                        local targetPos = head.Position
-                        local direction = (targetPos - origin)
-                        local dist = direction.Magnitude
-                        
-                        if dist > 0.1 then -- Avoid zero-length ray
-                            local rayDir = direction.Unit
-                            local rayOrigin = origin
-                            local rayLength = dist - 0.5 -- Stop just short of the head to avoid self-hit
-                
-                            local filter = {
-                                [myChar] = true,
-                                [v.Character] = true -- Exclude target character too
-                            }
-                            
-                            local hit = workspace:Raycast(
-                                Ray.new(rayOrigin, rayDir * rayLength),
-                                filter
-                            )
-                            
-                            -- If no hit, the line is clear (no walls/terrain in between)
-                            if not hit then
-                                shortest = dist3D
-                                closest = head
-                            end
-                        end
+                        shortest = dist3D
+                        closest = v
                     end
                 end
             end
         end
     end
     return closest
+end
+
+local function setCharm(player, active)
+    if not player or not player.Character then return end
+    
+    local char = player.Character
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and not part:FindFirstChildWhichIsA("Highlight") then
+            if active then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = Color3.fromRGB(255, 0, 0)
+                hl.OutlineColor = Color3.fromRGB(255, 0, 0)
+                hl.FillTransparency = 0.5
+                hl.OutlineTransparency = 0.2
+                hl.Parent = part
+            end
+        end
+    end
+end
+
+local function clearCharm(player)
+    if not player or not player.Character then return end
+    for _, hl in pairs(player.Character:GetDescendants()) do
+        if hl:IsA("Highlight") then
+            hl:Destroy()
+        end
+    end
 end
 
 -- Input Handling
@@ -89,6 +92,12 @@ uis.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.Equals then
         aiming = not aiming
     end
+    if input.KeyCode == Enum.KeyCode.RightBracket then
+        charmEnabled = not charmEnabled
+        if not charmEnabled then
+            clearCharm(currentTarget)
+        end
+    end
 end)
 
 uis.InputEnded:Connect(function(input)
@@ -102,8 +111,34 @@ rs.RenderStepped:Connect(function()
     
     if aiming then
         local target = getClosest()
-        if target then
-            cam.CFrame = CFrame.new(cam.CFrame.Position, target.Position)
+        
+        -- Charm Logic
+        if charmEnabled then
+            if target ~= currentTarget then
+                clearCharm(currentTarget)
+                currentTarget = target
+                if currentTarget then
+                    setCharm(currentTarget, true)
+                end
+            end
+        else
+            if currentTarget then
+                clearCharm(currentTarget)
+                currentTarget = nil
+            end
+        end
+        
+        -- Aim Logic
+        if target and target.Character then
+            local head = target.Character:FindFirstChild("Head")
+            if head then
+                cam.CFrame = CFrame.new(cam.CFrame.Position, head.Position)
+            end
+        end
+    else
+        if currentTarget then
+            clearCharm(currentTarget)
+            currentTarget = nil
         end
     end
 end)
