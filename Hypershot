@@ -28,16 +28,22 @@ fovCircle.Filled = false
 
 local highlightedPlayers = {}
 
--- UNIVERSAL PART FINDERS
+-- UNIVERSAL PART FINDERS (Enhanced for Hypershot)
 local function getRootPart(character)
     if not character then return nil end
+    
+    -- Try standard parts first
     local hrp = character:FindFirstChild("HumanoidRootPart")
     if hrp then return hrp end
+    
     local torso = character:FindFirstChild("Torso")
     if torso then return torso end
+    
     local head = character:FindFirstChild("Head")
     if head then return head end
-    for _, part in pairs(character:GetChildren()) do
+    
+    -- Fallback: Find any BasePart in the character
+    for _, part in pairs(character:GetDescendants()) do
         if part:IsA("BasePart") then
             return part
         end
@@ -47,16 +53,20 @@ end
 
 local function getTargetPart(character, useBody)
     if not character then return nil end
+    
     if useBody then
         local root = getRootPart(character)
         if root then return root end
     end
+    
     local head = character:FindFirstChild("Head")
     if head then return head end
+    
     return getRootPart(character)
 end
 
 local function isTeammate(player)
+    -- Hypershot might use Team objects, but some players might not have a team
     if not plr.Team or not player.Team then
         return false
     end
@@ -206,7 +216,16 @@ rs.RenderStepped:Connect(function()
         end
         
         if closest then
+            -- Debug: Print the current target
+            if game:GetService("RunService"):IsStepped() and math.fmod(tick(), 1) < 0.02 then
+                print("Aiming at: " .. closest.player.Name .. " | Part: " .. closest.part.Name .. " | Dist: " .. string.format("%.2f", closest.dist3D))
+            end
             cam.CFrame = CFrame.new(cam.CFrame.Position, closest.part.Position)
+        else
+            -- Debug: Print if no target found
+            if game:GetService("RunService"):IsStepped() and math.fmod(tick(), 1) < 0.02 then
+                print("No valid targets found. My Root: " .. (getRootPart(plr.Character) and getRootPart(plr.Character).Name or "Nil"))
+            end
         end
     end
     
