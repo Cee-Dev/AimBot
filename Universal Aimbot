@@ -7,12 +7,19 @@ local aiming = false
 local fovEnabled = true
 local charmEnabled = true
 local aimBody = false -- false = Head, true = Body
-local fovRadius = 150
+
+-- CONFIG
+local MIN_DIST = 1
+local MAX_DIST = 100
+local FOV_NORMAL = 150
+local FOV_SCOPED = 300 -- Larger FOV when scoping
+
+local currentFovRadius = FOV_NORMAL
 
 -- FOV Circle
 local fovCircle = Drawing.new("Circle")
 fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-fovCircle.Radius = fovRadius
+fovCircle.Radius = FOV_NORMAL
 fovCircle.Color = Color3.fromRGB(255, 0, 0)
 fovCircle.Thickness = 1
 fovCircle.Transparency = 0.6
@@ -30,7 +37,6 @@ local function getRootPart(character)
     if torso then return torso end
     local head = character:FindFirstChild("Head")
     if head then return head end
-    -- Fallback: Find any BasePart in the character
     for _, part in pairs(character:GetChildren()) do
         if part:IsA("BasePart") then
             return part
@@ -41,23 +47,17 @@ end
 
 local function getTargetPart(character, useBody)
     if not character then return nil end
-    
     if useBody then
         local root = getRootPart(character)
         if root then return root end
     end
-    
     local head = character:FindFirstChild("Head")
     if head then return head end
-    
-    -- Fallback to root if head not found
     return getRootPart(character)
 end
 
--- UNIVERSAL TEAM CHECK
 local function isTeammate(player)
     if not plr.Team or not player.Team then
-        -- If no teams exist, assume everyone is an enemy (or use a custom check)
         return false
     end
     return plr.Team == player.Team
@@ -77,18 +77,23 @@ local function getValidTargets()
             
             local targetPart = getTargetPart(v.Character, aimBody)
             if targetPart then
-                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
-                if onScreen then
-                    local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                    local dist3D = (targetPart.Position - origin).Magnitude
-                    
-                    if distFromCenter <= fovRadius then
-                        table.insert(targets, {
-                            player = v, 
-                            part = targetPart, 
-                            screenDist = distFromCenter,
-                            dist3D = dist3D
-                        })
+                local dist3D = (targetPart.Position - origin).Magnitude
+                
+                -- Distance Filter (1-100 studs)
+                if dist3D >= MIN_DIST and dist3D <= MAX_DIST then
+                    local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+                    if onScreen then
+                        local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        
+                        -- Use dynamic FOV radius
+                        if distFromCenter <= currentFovRadius then
+                            table.insert(targets, {
+                                player = v, 
+                                part = targetPart, 
+                                screenDist = distFromCenter,
+                                dist3D = dist3D
+                            })
+                        end
                     end
                 end
             end
@@ -149,9 +154,7 @@ end
 uis.InputBegan:Connect(function(input, gpe)
     if gpe then return end
     
-    if input.KeyCode == Enum.KeyCode.Q then
-        aiming = true
-    end
+    -- Toggles
     if input.KeyCode == Enum.KeyCode.Minus then
         fovEnabled = not fovEnabled
         fovCircle.Visible = fovEnabled
@@ -171,11 +174,22 @@ uis.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.LeftBracket then
         aimBody = not aimBody
     end
+    
+    -- Scope Detection (RMB)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        currentFovRadius = FOV_SCOPED
+        fovCircle.Radius = FOV_SCOPED
+    end
 end)
 
 uis.InputEnded:Connect(function(input)
     if input.KeyCode == Enum.KeyCode.Q then
         aiming = false
+    end
+    -- Un-scope Detection
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        currentFovRadius = FOV_NORMAL
+        fovCircle.Radius = FOV_NORMAL
     end
 end)
 
