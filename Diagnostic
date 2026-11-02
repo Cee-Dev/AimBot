@@ -15,6 +15,7 @@ local FOV_NORMAL = 150
 local FOV_SCOPED = 300
 
 local currentFovRadius = FOV_NORMAL
+local lastPrintTime = 0
 
 -- FOV Circle
 local fovCircle = Drawing.new("Circle")
@@ -27,13 +28,11 @@ fovCircle.Visible = true
 fovCircle.Filled = false
 
 local highlightedPlayers = {}
-local lastPrintTime = 0
 
--- UNIVERSAL PART FINDERS (Enhanced for Hypershot)
+-- UNIVERSAL PART FINDERS
 local function getRootPart(character)
     if not character then return nil end
     
-    -- Try standard parts first
     local hrp = character:FindFirstChild("HumanoidRootPart")
     if hrp then return hrp end
     
@@ -43,7 +42,6 @@ local function getRootPart(character)
     local head = character:FindFirstChild("Head")
     if head then return head end
     
-    -- Fallback: Find any BasePart in the character
     for _, part in pairs(character:GetDescendants()) do
         if part:IsA("BasePart") then
             return part
@@ -67,7 +65,6 @@ local function getTargetPart(character, useBody)
 end
 
 local function isTeammate(player)
-    -- Hypershot might use Team objects, but some players might not have a team
     if not plr.Team or not player.Team then
         return false
     end
