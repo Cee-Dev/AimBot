@@ -21,35 +21,45 @@ fovCircle.Filled = false
 
 local highlightedPlayers = {}
 
-local function getTargetPosition(character)
+-- Returns the part we should aim at based on current toggle
+local function getTargetPart(character)
     if aimBody then
         local hrp = character:FindFirstChild("HumanoidRootPart")
-        if hrp then return hrp.Position end
+        if hrp then return hrp end
     end
     local head = character:FindFirstChild("Head")
-    if head then return head.Position end
-    return nil
+    if head then return head end
+    return character:FindFirstChild("HumanoidRootPart") -- Fallback
 end
 
+-- Gets valid targets and calculates screen distance
 local function getValidTargets()
     local targets = {}
     local myTeam = plr.TeamColor
     local myHead = plr.Character and plr.Character:FindFirstChild("Head")
     if not myHead then return targets end
     local origin = myHead.Position
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
 
     for _, v in pairs(game.Players:GetPlayers()) do
         if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
             if v.TeamColor == myTeam then continue end
             
-            local targetPart = getTargetPosition(v.Character)
+            local targetPart = getTargetPart(v.Character)
             if targetPart then
-                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart)
+                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
                 if onScreen then
-                    local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - fovCircle.Position).Magnitude
-                    local dist3D = (targetPart - origin).Magnitude
+                    local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                    local dist3D = (targetPart.Position - origin).Magnitude
+                    
+                    -- Must be inside FOV
                     if distFromCenter <= fovRadius then
-                        table.insert(targets, {player = v, pos = targetPart, dist = dist3D})
+                        table.insert(targets, {
+                            player = v, 
+                            part = targetPart, 
+                            screenDist = distFromCenter,
+                            dist3D = dist3D
+                        })
                     end
                 end
             end
@@ -147,18 +157,20 @@ rs.RenderStepped:Connect(function()
     local targets = getValidTargets()
     
     if aiming then
-        -- Aim at closest target
+        -- Find target closest to CROSSHAIR (screen center)
         local closest = nil
-        local shortest = math.huge
+        local shortestScreenDist = math.huge
+        
         for _, t in ipairs(targets) do
-            if t.dist < shortest then
-                shortest = t.dist
+            if t.screenDist < shortestScreenDist then
+                shortestScreenDist = t.screenDist
                 closest = t
             end
         end
         
         if closest then
-            cam.CFrame = CFrame.new(cam.CFrame.Position, closest.pos)
+            -- Smoothly aim at the crosshair-priority target
+            cam.CFrame = CFrame.new(cam.CFrame.Position, closest.part.Position)
         end
     end
     
