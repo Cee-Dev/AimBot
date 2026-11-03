@@ -1,0 +1,440 @@
+-- SERVICES
+local uis = game:GetService("UserInputService")
+local plr = game.Players.LocalPlayer
+local cam = workspace.CurrentCamera
+local rs = game:GetService("RunService")
+
+-- UI THEME & CONSTANTS
+local THEME = {
+    BG = Color3.fromRGB(12, 12, 12),
+    FRAME = Color3.fromRGB(0, 0, 0),
+    BORDER = Color3.fromRGB(41, 41, 41),
+    ACCENT = Color3.fromRGB(68, 162, 249),
+    TEXT = Color3.fromRGB(255, 255, 255),
+    TEXT_DIM = Color3.fromRGB(160, 160, 160),
+    SUCCESS = Color3.fromRGB(0, 255, 0)
+}
+
+local UI_STATE = {
+    visible = true,
+    activeTab = "HOME"
+}
+
+-- CORE LOGIC VARIABLES (Preserved)
+local aiming = false
+local fovEnabled = true
+local charmEnabled = true
+local aimBody = false
+local fovRadius = 150
+
+-- UI REFERENCES
+local mainFrame
+local uiElements = {}
+
+-- ================= CORE LOGIC (PRESERVED) =================
+
+local function getTargetPart(character)
+    if aimBody then
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp end
+    end
+    local head = character:FindFirstChild("Head")
+    if head then return head end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getValidTargets()
+    local targets = {}
+    local myTeam = plr.TeamColor
+    local myHead = plr.Character and plr.Character:FindFirstChild("Head")
+    if not myHead then return targets end
+    local origin = myHead.Position
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    for _, v in pairs(game.Players:GetPlayers()) do
+        if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+            if v.TeamColor == myTeam then continue end
+            
+            local targetPart = getTargetPart(v.Character)
+            if targetPart then
+                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+                if onScreen then
+                    local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                    local dist3D = (targetPart.Position - origin).Magnitude
+                    
+                    if distFromCenter <= fovRadius then
+                        table.insert(targets, {
+                            player = v, 
+                            part = targetPart, 
+                            screenDist = distFromCenter,
+                            dist3D = dist3D
+                        })
+                    end
+                end
+            end
+        end
+    end
+    return targets
+end
+
+local function setCharm(player, active)
+    if not player or not player.Character then return end
+    local char = player.Character
+    for _, part in pairs(char:GetDescendants()) do
+        if part:IsA("BasePart") and not part:FindFirstChildWhichIsA("Highlight") then
+            if active then
+                local hl = Instance.new("Highlight")
+                hl.FillColor = Color3.fromRGB(255, 0, 0)
+                hl.OutlineColor = Color3.fromRGB(255, 0, 0)
+                hl.FillTransparency = 0.5
+                hl.OutlineTransparency = 0.2
+                hl.Parent = part
+            end
+        end
+    end
+end
+
+local function clearCharm(player)
+    if not player or not player.Character then return end
+    for _, hl in pairs(player.Character:GetDescendants()) do
+        if hl:IsA("Highlight") then
+            hl:Destroy()
+        end
+    end
+end
+
+local function updateCharm(targets)
+    local activePlayers = {}
+    for _, t in ipairs(targets) do
+        activePlayers[t.player] = true
+    end
+    
+    for p, _ in pairs(highlightedPlayers) do
+        if not activePlayers[p] then
+            clearCharm(p)
+            highlightedPlayers[p] = nil
+        end
+    end
+    
+    for p, _ in pairs(activePlayers) do
+        if not highlightedPlayers[p] then
+            setCharm(p, true)
+            highlightedPlayers[p] = true
+        end
+    end
+end
+
+local function toggleUI()
+    UI_STATE.visible = not UI_STATE.visible
+    mainFrame.Visible = UI_STATE.visible
+end
+
+local function updateUIState()
+    if not mainFrame or not mainFrame.Visible then return end
+    -- Update visual states of toggles
+    local fovToggle = uiElements.fovToggle
+    local charmToggle = uiElements.charmToggle
+    local bodyToggle = uiElements.bodyToggle
+    
+    if fovToggle then
+        fovToggle.BackgroundColor3 = fovEnabled and THEME.ACCENT or THEME.BG
+        fovToggle.Text = fovEnabled and "ON" or "OFF"
+    end
+    if charmToggle then
+        charmToggle.BackgroundColor3 = charmEnabled and THEME.ACCENT or THEME.BG
+        charmToggle.Text = charmEnabled and "ON" or "OFF"
+    end
+    if bodyToggle then
+        bodyToggle.BackgroundColor3 = aimBody and THEME.ACCENT or THEME.BG
+        bodyToggle.Text = aimBody and "BODY" or "HEAD"
+    end
+end
+
+-- ================= UI CONSTRUCTION =================
+
+local function createInstance(className, props, children)
+    local inst = Instance.new(className)
+    for k, v in pairs(props) do
+        if type(k) == "number" then
+            -- Handle children array if passed as 1,2,3...
+            continue
+        end
+        inst[k] = v
+    end
+    if children then
+        for _, child in ipairs(children) do
+            child.Parent = inst
+        end
+    end
+    return inst
+end
+
+local function createButton(text, props)
+    local btn = createInstance("TextButton", {
+        Text = text,
+        Font = Enum.Font.PoppinsSemiBold,
+        TextSize = 14,
+        TextColor3 = THEME.TEXT,
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0,
+        Size = UDim2.new(0, 100, 0, 36),
+        AutoButtonColor = false
+    }, props.children or {})
+    
+    btn.MouseEnter:Connect(function()
+        if not props.disabled then
+            btn.BackgroundColor3 = THEME.BORDER
+        end
+    end)
+    btn.MouseLeave:Connect(function()
+        if not props.disabled then
+            btn.BackgroundColor3 = THEME.BG
+        end
+    end)
+    
+    if props.onClick then
+        btn.MouseButton1Click:Connect(function()
+            props.onClick()
+        end)
+    end
+    return btn
+end
+
+local function createToggle(label, initialOn, onChange)
+    local container = createInstance("Frame", {
+        Size = UDim2.new(0, 180, 0, 40),
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0
+    })
+    
+    local labelTxt = createInstance("TextLabel", {
+        Text = label,
+        Font = Enum.Font.PoppinsMedium,
+        TextSize = 13,
+        TextColor3 = THEME.TEXT,
+        BackgroundTransparency = 1,
+        Size = UDim2.new(0.6, 0, 1, 0),
+        TextXAlignment = Enum.TextXAlignment.Left
+    }, { Parent = container })
+    
+    local toggleBtn = createInstance("TextButton", {
+        Text = initialOn and "ON" or "OFF",
+        Font = Enum.Font.PoppinsSemiBold,
+        TextSize = 12,
+        TextColor3 = THEME.TEXT,
+        BackgroundColor3 = initialOn and THEME.ACCENT or THEME.BORDER,
+        BorderSizePixel = 0,
+        Size = UDim2.new(0, 60, 0, 24),
+        Position = UDim2.new(0.65, 0, 0.5, -12),
+        AutoButtonColor = false
+    }, { Parent = container })
+    
+    toggleBtn.MouseButton1Click:Connect(function()
+        local state = toggleBtn.Text == "ON"
+        toggleBtn.Text = state and "OFF" or "ON"
+        toggleBtn.BackgroundColor3 = state and THEME.BORDER or THEME.ACCENT
+        if onChange then onChange(not state) end
+    end)
+    
+    return container, toggleBtn
+end
+
+local function buildUI()
+    -- Main Frame
+    mainFrame = createInstance("Frame", {
+        Name = "FlowHubUI",
+        Size = UDim2.new(0, 450, 0, 600),
+        Position = UDim2.new(0.5, -225, 0.5, -300),
+        BackgroundColor3 = THEME.FRAME,
+        BorderSizePixel = 0,
+        Visible = UI_STATE.visible
+    }, { Parent = game:GetService("CoreGui") })
+    
+    -- Main Panel
+    local panel = createInstance("Frame", {
+        Name = "MainPanel",
+        Size = UDim2.new(1, -8, 1, -8),
+        Position = UDim2.new(0, 4, 0, 4),
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0
+    }, { Parent = mainFrame })
+    
+    -- Title Bar
+    local titleBar = createInstance("Frame", {
+        Name = "TitleBar",
+        Size = UDim2.new(1, 0, 0, 40),
+        BackgroundColor3 = THEME.FRAME,
+        BorderSizePixel = 0
+    }, { Parent = panel })
+    
+    local logo = createInstance("TextLabel", {
+        Text = "〰 FLOWHUB",
+        Font = Enum.Font.PoppinsBold,
+        TextSize = 14,
+        TextColor3 = THEME.ACCENT,
+        BackgroundTransparency = 1,
+        Size = UDim2.new(0, 100, 1, 0),
+        Position = UDim2.new(0, 10, 0, 0),
+        TextXAlignment = Enum.TextXAlignment.Left
+    }, { Parent = titleBar })
+    
+    -- Window Controls (Min/Close)
+    local btnMin = createInstance("TextButton", {
+        Text = "—",
+        Font = Enum.Font.PoppinsMedium,
+        TextSize = 14,
+        TextColor3 = THEME.TEXT_DIM,
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0,
+        Size = UDim2.new(0, 30, 0, 24),
+        Position = UDim2.new(1, -70, 0.5, -12),
+        AutoButtonColor = false
+    }, { Parent = titleBar })
+    
+    local btnClose = createInstance("TextButton", {
+        Text = "✕",
+        Font = Enum.Font.PoppinsMedium,
+        TextSize = 14,
+        TextColor3 = THEME.TEXT_DIM,
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0,
+        Size = UDim2.new(0, 30, 0, 24),
+        Position = UDim2.new(1, -38, 0.5, -12),
+        AutoButtonColor = false
+    }, { Parent = titleBar })
+    
+    btnMin.MouseButton1Click:Connect(function()
+        mainFrame.Visible = false
+    end)
+    
+    btnClose.MouseButton1Click:Connect(function()
+        mainFrame:Destroy()
+    end)
+    
+    -- Content Area
+    local content = createInstance("ScrollingFrame", {
+        Name = "Content",
+        Size = UDim2.new(1, -16, 1, -56),
+        Position = UDim2.new(0, 8, 0, 48),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        CanvasSize = UDim2.new(0, 0, 0, 800),
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = THEME.ACCENT
+    }, { Parent = panel })
+    
+    local contentList = createInstance("UIListLayout", {
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 12)
+    }, { Parent = content })
+    
+    -- 1. DASHBOARD / TOGGLES SECTION
+    local secToggles = createInstance("Frame", {
+        Size = UDim2.new(1, 0, 0, 160),
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0
+    }, { Parent = content })
+    
+    local lblToggles = createInstance("TextLabel", {
+        Text = "SYSTEM CONTROLS",
+        Font = Enum.Font.PoppinsBold,
+        TextSize = 12,
+        TextColor3 = THEME.ACCENT,
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 20),
+        TextXAlignment = Enum.TextXAlignment.Left
+    }, { Parent = secToggles })
+    
+    local toggleContainer = createInstance("Frame", {
+        Size = UDim2.new(1, 0, 1, -20),
+        Position = UDim2.new(0, 0, 0, 20),
+        BackgroundTransparency = 1
+    }, { Parent = secToggles })
+    
+    local gridLayout = createInstance("UIGridLayout", {
+        CellSize = UDim2.new(0.45, 0, 0, 40),
+        CellPadding = UDim2.new(0.05, 0, 0.2, 0),
+        SortOrder = Enum.SortOrder.LayoutOrder
+    }, { Parent = toggleContainer })
+    
+    -- Create Toggles
+    local fovFrame, uiElements.fovToggle = createToggle("FOV CIRCLE", fovEnabled, function(state)
+        fovEnabled = state
+        fovCircle.Visible = state
+    end)
+    fovFrame.LayoutOrder = 1
+    fovFrame.Parent = toggleContainer
+    
+    local charmFrame, uiElements.charmToggle = createToggle("CHARM HIGHLIGHT", charmEnabled, function(state)
+        charmEnabled = state
+        if not state then
+            for p, _ in pairs(highlightedPlayers) do
+                clearCharm(p)
+            end
+            highlightedPlayers = {}
+        end
+    end)
+    charmFrame.LayoutOrder = 2
+    charmFrame.Parent = toggleContainer
+    
+    local bodyFrame, uiElements.bodyToggle = createToggle("AIM TARGET", aimBody, function(state)
+        aimBody = state
+    end)
+    bodyFrame.LayoutOrder = 3
+    bodyFrame.Parent = toggleContainer
+    
+    local aimFrame, uiElements.aimToggle = createToggle("AIM ASSIST", aiming, function(state)
+        aiming = state
+    end)
+    aimFrame.LayoutOrder = 4
+    aimFrame.Parent = toggleContainer
+    
+    -- 2. CLIENTS / EXPLORER SECTION
+    local secClients = createInstance("Frame", {
+        Size = UDim2.new(1, 0, 0, 200),
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0
+    }, { Parent = content })
+    
+    local lblClients = createInstance("TextLabel", {
+        Text = "ACTIVE TARGETS",
+        Font = Enum.Font.PoppinsBold,
+        TextSize = 12,
+        TextColor3 = THEME.ACCENT,
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 20),
+        TextXAlignment = Enum.TextXAlignment.Left
+    }, { Parent = secClients })
+    
+    local clientList = createInstance("Frame", {
+        Size = UDim2.new(1, 0, 1, -20),
+        Position = UDim2.new(0, 0, 0, 20),
+        BackgroundTransparency = 1
+    }, { Parent = secClients })
+    
+    local clientLayout = createInstance("UIListLayout", {
+        Padding = UDim.new(0, 4),
+        SortOrder = Enum.SortOrder.LayoutOrder
+    }, { Parent = clientList })
+    
+    uiElements.clientList = clientList
+    
+    -- 3. SETTINGS / FOOTER
+    local secFooter = createInstance("Frame", {
+        Size = UDim2.new(1, 0, 0, 50),
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0
+    }, { Parent = content })
+    
+    local btnExecute = createButton("EXECUTE SNAPSHOT", {
+        Size = UDim2.new(0, 150, 0, 36),
+        Position = UDim2.new(0, 0, 0.5, -18),
+        BackgroundColor3 = THEME.ACCENT,
+        TextColor3 = Color3.fromRGB(0, 0, 0),
+        onClick = function()
+            -- Custom action hook
+            print("FlowHub: Snapshot Executed")
+        end
+    }, { Parent = secFooter })
+    
+    local btn
