@@ -1,108 +1,287 @@
-local uis = game:GetService("UserInputService")
-local plr = game.Players.LocalPlayer
+--[[
+    C-HUB v2.0 — Aimbot, ESP & TriggerBot panel
+    [L] show/hide UI   [=] aim   [-] FOV circle   [ ] ] ESP charms   [ [ ] head/body
+    TriggerBot: UI toggle (AIM tab) with instant head-lock and zero-delay fire
+]]
+
+-- ══════════════════════════════════════════════
+--  SERVICES
+-- ══════════════════════════════════════════════
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+
+local plr = Players.LocalPlayer
+local Mouse = plr:GetMouse()
 local cam = workspace.CurrentCamera
-local rs = game:GetService("RunService")
 
-local aiming = false
-local fovEnabled = true
-local charmEnabled = true
-local aimBody = false -- false = Head, true = Body
+local VERSION = "2.0"
 
--- CONFIG
-local MIN_DIST = 1
-local MAX_DIST = 100
-local FOV_NORMAL = 150
-local FOV_SCOPED = 300
+-- ══════════════════════════════════════════════
+--  THEME  (every key here is user-customizable in STYLE)
+-- ══════════════════════════════════════════════
+local C = {
+    Bg        = Color3.fromRGB(12, 12, 16),
+    Surface   = Color3.fromRGB(20, 20, 26),
+    Hover     = Color3.fromRGB(34, 34, 44),
+    Border    = Color3.fromRGB(38, 38, 48),
+    Accent    = Color3.fromRGB(68, 162, 249),
+    Text      = Color3.fromRGB(240, 240, 245),
+    Muted     = Color3.fromRGB(100, 100, 115),
+    Off       = Color3.fromRGB(46, 46, 56),
+    Logo      = Color3.fromRGB(68, 162, 249),
+    LogoGlyph = Color3.fromRGB(255, 255, 255),
+    Version   = Color3.fromRGB(100, 100, 115),
+    White     = Color3.fromRGB(255, 255, 255),
+    Black     = Color3.fromRGB(0, 0, 0),
+}
 
-local currentFovRadius = FOV_NORMAL
+local FAST   = TweenInfo.new(0.1,  Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
+local SMOOTH = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local BOUNCE = TweenInfo.new(0.35, Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
+local GENTLE = TweenInfo.new(0.8,  Enum.EasingStyle.Sine,  Enum.EasingDirection.InOut)
 
--- FOV Circle
+local PALETTE = {
+    Color3.fromRGB(255, 255, 255),   -- White
+    Color3.fromRGB(255, 55, 55),     -- Red
+    Color3.fromRGB(255, 145, 45),    -- Orange
+    Color3.fromRGB(255, 230, 55),    -- Yellow
+    Color3.fromRGB(75, 230, 75),     -- Green
+    Color3.fromRGB(45, 220, 215),    -- Cyan
+    Color3.fromRGB(68, 162, 249),    -- Blue
+    Color3.fromRGB(140, 85, 255),    -- Purple
+    Color3.fromRGB(255, 85, 175),    -- Pink
+    Color3.fromRGB(255, 45, 125),    -- Magenta
+}
+
+-- themed-object registry: bind(obj, "BackgroundColor3", "Surface")
+local themed      = {}
+local toggleRefs  = {}
+local themeHooks  = {}   -- extra callbacks run after a theme change
+
+local function bind(obj, prop, key)
+    obj[prop] = C[key]
+    table.insert(themed, {obj, prop, key})
+    return obj
+end
+
+local function applyTheme()
+    for _, t in ipairs(themed) do
+        pcall(function() t[1][t[2]] = C[t[3]] end)
+    end
+    for _, ref in pairs(toggleRefs) do ref.recolor() end
+    for _, fn in ipairs(themeHooks) do pcall(fn) end
+end
+
+-- ══════════════════════════════════════════════
+--  STATE
+-- ══════════════════════════════════════════════
+local aiming            = false
+local triggerbotEnabled = false
+local lastTriggerShot   = 0
+local fovEnabled        = true
+local charmEnabled  = true
+local aimBody       = false
+local fovRadius     = 150
+local aimSmooth     = 50
+
+local espDistance   = true
+local espHealth     = true
+local espSkeleton   = true
+local espNames      = true
+local detectNPCs    = true     -- ESP picks up every Humanoid (NPCs, bots, dummies)
+local aimNPCs       = false    -- aimbot is allowed to lock onto NPCs
+local espRange      = 1500     -- ESP / charms range in studs
+
+local maxDistance   = 500
+local zoneEnabled   = false
+local zoneRadius    = 400
+local zoneCenter    = nil
+
+local HEAD_SCALE    = 0.7      -- skeleton head circle size (smaller = tighter circle)
+
+-- customizable ESP colors
+local fovColor        = Color3.fromRGB(255, 55, 55)
+local skelColor       = Color3.fromRGB(255, 255, 255)
+local charmsFillColor = Color3.fromRGB(255, 40, 40)
+local charmsOutColor  = Color3.fromRGB(255, 255, 255)
+local nameColor       = Color3.fromRGB(255, 255, 255)
+local distColor       = Color3.fromRGB(255, 255, 255)
+
+local targetCount   = 0
+local espCount      = 0
+local manualUntil   = 0
+local mouseDeltaAcc = 0
+local uiVisible     = true
+local minimized     = false
+
+-- ══════════════════════════════════════════════
+--  NOTIFICATION (showTempMessage)
+-- ══════════════════════════════════════════════
+local function showTempMessage(text, color)
+    task.spawn(function()
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "TempMessageUI"
+        screenGui.ResetOnSpawn = false
+        pcall(function()
+            if syn and syn.protect_gui then syn.protect_gui(screenGui) end
+        end)
+        pcall(function() screenGui.Parent = game:GetService("CoreGui") end)
+        if not screenGui.Parent then screenGui.Parent = plr:WaitForChild("PlayerGui") end
+
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(0, 220, 0, 42)
+        textLabel.Position = UDim2.new(0, 16, 1, -60)
+        textLabel.BackgroundTransparency = 0.2
+        textLabel.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+        textLabel.Text = text
+        textLabel.TextColor3 = color or Color3.fromRGB(255, 255, 255)
+        textLabel.Font = Enum.Font.GothamBold
+        textLabel.TextSize = 13
+        textLabel.TextStrokeTransparency = 0.7
+        textLabel.Parent = screenGui
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = textLabel
+
+        local s = Instance.new("UIStroke")
+        s.Color = color or C.Accent
+        s.Thickness = 1.2
+        s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        s.Parent = textLabel
+
+        task.wait(2.5)
+        local tw = TweenService:Create(textLabel, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            BackgroundTransparency = 1,
+            TextTransparency = 1,
+            TextStrokeTransparency = 1,
+        })
+        tw:Play()
+        tw.Completed:Wait()
+        screenGui:Destroy()
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  FOV CIRCLE
+-- ══════════════════════════════════════════════
 local fovCircle = Drawing.new("Circle")
-fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-fovCircle.Radius = FOV_NORMAL
-fovCircle.Color = Color3.fromRGB(255, 0, 0)
-fovCircle.Thickness = 1
+fovCircle.Position     = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+fovCircle.Radius       = fovRadius
+fovCircle.Color        = fovColor
+fovCircle.Thickness    = 1
 fovCircle.Transparency = 0.6
-fovCircle.Visible = true
-fovCircle.Filled = false
+fovCircle.Visible      = true
+fovCircle.Filled       = false
 
-local highlightedPlayers = {}
+-- ══════════════════════════════════════════════
+--  TEAM CHECK
+-- ══════════════════════════════════════════════
+local function isTeammate(p)
+    if p == plr then return true end
+    if plr.Team ~= nil and p.Team ~= nil then return plr.Team == p.Team end
+    if plr.Team ~= nil or p.Team ~= nil then return false end
+    local a, b = plr:GetAttribute("Team"), p:GetAttribute("Team")
+    if a ~= nil and a == b then return true end
+    return false
+end
 
--- UNIVERSAL PART FINDERS (Enhanced for Hypershot)
-local function getRootPart(character)
-    if not character then return nil end
-    
-    -- Try standard parts first
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if hrp then return hrp end
-    
-    local torso = character:FindFirstChild("Torso")
-    if torso then return torso end
-    
-    local head = character:FindFirstChild("Head")
-    if head then return head end
-    
-    -- Fallback: Find any BasePart in the character
-    for _, part in pairs(character:GetDescendants()) do
-        if part:IsA("BasePart") then
-            return part
+-- ══════════════════════════════════════════════
+--  ENTITY TRACKER — every Humanoid in the map (players + NPCs)
+-- ══════════════════════════════════════════════
+local entities = {}   -- [model] = humanoid
+
+local function registerHumanoid(h)
+    if not h or not h:IsA("Humanoid") then return end
+    local model = h.Parent
+    if model and model:IsA("Model") then entities[model] = h end
+end
+
+task.spawn(function()
+    local n = 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("Humanoid") then registerHumanoid(d) end
+        n = n + 1
+        if n % 3000 == 0 then task.wait() end
+    end
+end)
+
+workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("Humanoid") then task.defer(registerHumanoid, d) end
+end)
+
+workspace.DescendantRemoving:Connect(function(d)
+    if d:IsA("Humanoid") then
+        local m = d.Parent
+        if m and entities[m] == d then entities[m] = nil end
+    end
+end)
+
+-- slow safety rescan (streaming / re-parented humanoids)
+task.spawn(function()
+    while task.wait(10) do
+        local n = 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Humanoid") then registerHumanoid(d) end
+            n = n + 1
+            if n % 3000 == 0 then task.wait() end
         end
     end
-    return nil
-end
+end)
 
-local function getTargetPart(character, useBody)
-    if not character then return nil end
-    
-    if useBody then
-        local root = getRootPart(character)
-        if root then return root end
+-- Returns: player (or nil for NPC), rootPart, headPart, displayName, hasRealHead
+-- Returns false when the entity should be ignored.
+local function describe(model, hum, forAim)
+    if hum.Parent ~= model or model.Parent == nil then entities[model] = nil; return false end
+    if hum.Health <= 0 or model == plr.Character then return false end
+
+    local p = Players:GetPlayerFromCharacter(model)
+    if p then
+        if p == plr or isTeammate(p) then return false end
+    else
+        if forAim then
+            if not aimNPCs then return false end
+        elseif not detectNPCs then
+            return false
+        end
     end
-    
-    local head = character:FindFirstChild("Head")
-    if head then return head end
-    
-    return getRootPart(character)
+
+    local root = model:FindFirstChild("HumanoidRootPart") or hum.RootPart or model.PrimaryPart
+        or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
+    if not root or not root:IsA("BasePart") then return false end
+
+    local realHead = model:FindFirstChild("Head")
+    if realHead and not realHead:IsA("BasePart") then realHead = nil end
+    return p, root, realHead or root, p and p.DisplayName or model.Name, realHead ~= nil
 end
 
-local function isTeammate(player)
-    -- Hypershot might use Team objects, but some players might not have a team
-    if not plr.Team or not player.Team then
-        return false
+-- ══════════════════════════════════════════════
+--  TARGET FILTERS / AIM CORE
+-- ══════════════════════════════════════════════
+local function passesFilters(part)
+    local pos = part.Position
+    if (pos - cam.CFrame.Position).Magnitude > maxDistance then return false end
+    if zoneEnabled and zoneCenter then
+        local flat = Vector3.new(pos.X - zoneCenter.X, 0, pos.Z - zoneCenter.Z)
+        if flat.Magnitude > zoneRadius then return false end
     end
-    return plr.Team == player.Team
+    return true
 end
 
--- GET VALID TARGETS
 local function getValidTargets()
     local targets = {}
-    local myRoot = getRootPart(plr.Character)
-    if not myRoot then return targets end
-    local origin = myRoot.Position
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-
-    for _, v in pairs(game.Players:GetPlayers()) do
-        if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
-            if isTeammate(v) then continue end
-            
-            local targetPart = getTargetPart(v.Character, aimBody)
-            if targetPart then
-                local dist3D = (targetPart.Position - origin).Magnitude
-                
-                if dist3D >= MIN_DIST and dist3D <= MAX_DIST then
-                    local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
-                    if onScreen then
-                        local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                        
-                        if distFromCenter <= currentFovRadius then
-                            table.insert(targets, {
-                                player = v, 
-                                part = targetPart, 
-                                screenDist = distFromCenter,
-                                dist3D = dist3D
-                            })
-                        end
-                    end
+    for model, hum in pairs(entities) do
+        local p, root, head = describe(model, hum, true)
+        if root then
+            local part = aimBody and root or head
+            local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+            if onScreen then
+                local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                if d <= fovRadius and passesFilters(part) then
+                    table.insert(targets, {model = model, part = part, screenDist = d})
                 end
             end
         end
@@ -110,131 +289,1279 @@ local function getValidTargets()
     return targets
 end
 
--- CHARM LOGIC
-local function setCharm(player, active)
-    if not player or not player.Character then return end
-    local char = player.Character
-    for _, part in pairs(char:GetDescendants()) do
-        if part:IsA("BasePart") and not part:FindFirstChildWhichIsA("Highlight") then
-            if active then
-                local hl = Instance.new("Highlight")
-                hl.FillColor = Color3.fromRGB(255, 0, 0)
-                hl.OutlineColor = Color3.fromRGB(255, 0, 0)
-                hl.FillTransparency = 0.5
-                hl.OutlineTransparency = 0.2
-                hl.Parent = part
+-- ══════════════════════════════════════════════
+--  CROSSHAIR TARGET DETECTOR (Zero-Delay TriggerBot)
+-- ══════════════════════════════════════════════
+local function getCrosshairTarget()
+    cam = workspace.CurrentCamera or cam
+    local origin = cam.CFrame.Position
+    local dir = cam.CFrame.LookVector * (maxDistance or 1000)
+
+    -- 1. Direct Center Viewport Raycast
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local filterList = {cam}
+    if plr.Character then table.insert(filterList, plr.Character) end
+    rayParams.FilterDescendantsInstances = filterList
+    rayParams.IgnoreWater = true
+
+    local hitResult = workspace:Raycast(origin, dir, rayParams)
+    local hitPart = hitResult and hitResult.Instance or (Mouse and Mouse.Target)
+
+    if hitPart then
+        local model = hitPart:FindFirstAncestorOfClass("Model")
+        if model and model ~= plr.Character then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local p, root, head = describe(model, hum, true)
+                if root and head then
+                    return model, head
+                end
             end
         end
     end
-end
 
-local function clearCharm(player)
-    if not player or not player.Character then return end
-    for _, hl in pairs(player.Character:GetDescendants()) do
-        if hl:IsA("Highlight") then
-            hl:Destroy()
-        end
-    end
-end
-
-local function updateCharm(targets)
-    local activePlayers = {}
-    for _, t in ipairs(targets) do
-        activePlayers[t.player] = true
-    end
-    
-    for p, _ in pairs(highlightedPlayers) do
-        if not activePlayers[p] then
-            clearCharm(p)
-            highlightedPlayers[p] = nil
-        end
-    end
-    
-    for p, _ in pairs(activePlayers) do
-        if not highlightedPlayers[p] then
-            setCharm(p, true)
-            highlightedPlayers[p] = true
-        end
-    end
-end
-
--- INPUT HANDLING
-uis.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    
-    if input.KeyCode == Enum.KeyCode.Minus then
-        fovEnabled = not fovEnabled
-        fovCircle.Visible = fovEnabled
-    end
-    if input.KeyCode == Enum.KeyCode.Equals then
-        aiming = not aiming
-    end
-    if input.KeyCode == Enum.KeyCode.RightBracket then
-        charmEnabled = not charmEnabled
-        if not charmEnabled then
-            for p, _ in pairs(highlightedPlayers) do
-                clearCharm(p)
-            end
-            highlightedPlayers = {}
-        end
-    end
-    if input.KeyCode == Enum.KeyCode.LeftBracket then
-        aimBody = not aimBody
-    end
-    
-    if input.UserInputType == Enum.UserInputType.MouseButton2 then
-        currentFovRadius = FOV_SCOPED
-        fovCircle.Radius = FOV_SCOPED
-    end
-end)
-
-uis.InputEnded:Connect(function(input)
-    if input.KeyCode == Enum.KeyCode.Q then
-        aiming = false
-    end
-    if input.UserInputType == Enum.UserInputType.MouseButton2 then
-        currentFovRadius = FOV_NORMAL
-        fovCircle.Radius = FOV_NORMAL
-    end
-end)
-
--- MAIN LOOP
-rs.RenderStepped:Connect(function()
-    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
-    
+    -- 2. Immediate screen-center proximity check (catches enemy within crosshair threshold)
     local targets = getValidTargets()
-    
-    if aiming then
-        local closest = nil
-        local shortestScreenDist = math.huge
-        
-        for _, t in ipairs(targets) do
-            if t.screenDist < shortestScreenDist then
-                shortestScreenDist = t.screenDist
-                closest = t
-            end
-        end
-        
-        if closest then
-            -- Debug: Print the current target
-            if game:GetService("RunService"):IsStepped() and math.fmod(tick(), 1) < 0.02 then
-                print("Aiming at: " .. closest.player.Name .. " | Part: " .. closest.part.Name .. " | Dist: " .. string.format("%.2f", closest.dist3D))
-            end
-            cam.CFrame = CFrame.new(cam.CFrame.Position, closest.part.Position)
-        else
-            -- Debug: Print if no target found
-            if game:GetService("RunService"):IsStepped() and math.fmod(tick(), 1) < 0.02 then
-                print("No valid targets found. My Root: " .. (getRootPart(plr.Character) and getRootPart(plr.Character).Name or "Nil"))
+    for _, t in ipairs(targets) do
+        if t.screenDist <= 24 then
+            local hum = t.model:FindFirstChildOfClass("Humanoid")
+            if hum then
+                local _, _, head = describe(t.model, hum, true)
+                if head then
+                    return t.model, head
+                end
             end
         end
     end
-    
-    if charmEnabled then
-        updateCharm(targets)
-    else
-        for p, _ in pairs(highlightedPlayers) do
-            clearCharm(p)
+
+    return nil, nil
+end
+
+-- ══════════════════════════════════════════════
+--  ESP — CHARMS (Highlight)  — players and NPCs in range
+-- ══════════════════════════════════════════════
+local espObjects = {}   -- [model] = Highlight
+local MAX_HIGHLIGHTS = 31
+
+local function removeESP(m)
+    local h = espObjects[m]
+    if h then pcall(function() h:Destroy() end); espObjects[m] = nil end
+end
+
+local function clearAllESP()
+    for m in pairs(espObjects) do removeESP(m) end
+end
+
+local function updateHighlights()
+    if not charmEnabled then clearAllESP(); return end
+    cam = workspace.CurrentCamera or cam
+    local camPos = cam.CFrame.Position
+
+    local list = {}
+    for model, hum in pairs(entities) do
+        local _, root = describe(model, hum, false)
+        if root then
+            local dist = (root.Position - camPos).Magnitude
+            if dist <= espRange then list[#list + 1] = {model, dist} end
         end
-        highlightedPlayers = {}
+    end
+    table.sort(list, function(a, b) return a[2] < b[2] end)
+
+    local keep = {}
+    for i = 1, math.min(#list, MAX_HIGHLIGHTS) do
+        local model = list[i][1]
+        keep[model] = true
+        local hl = espObjects[model]
+        if (not hl) or hl.Parent ~= model then
+            if hl then pcall(function() hl:Destroy() end) end
+            hl = Instance.new("Highlight")
+            hl.Adornee             = model
+            hl.FillTransparency    = 0.55
+            hl.OutlineTransparency = 0
+            hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Parent              = model
+            espObjects[model] = hl
+        end
+        hl.FillColor    = charmsFillColor
+        hl.OutlineColor = charmsOutColor
+    end
+    for m in pairs(espObjects) do
+        if not keep[m] then removeESP(m) end
+    end
+end
+
+-- ══════════════════════════════════════════════
+--  ESP — DRAWING API  (skeleton, head, health, distance, name)
+-- ══════════════════════════════════════════════
+local SKEL_R15 = {
+    {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"},  {"LeftUpperArm", "LeftLowerArm"},   {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"},  {"LeftUpperLeg", "LeftLowerLeg"},   {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+}
+local SKEL_R6 = {
+    {"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+    {"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+}
+
+local drawn = {}   -- [model] = drawing set
+
+local function newLine(th, col)
+    local l = Drawing.new("Line"); l.Thickness = th; l.Color = col or C.White; l.Visible = false; return l
+end
+local function newText()
+    local t = Drawing.new("Text"); t.Size = 13; t.Center = true; t.Outline = true; t.Color = C.White; t.Visible = false
+    pcall(function() t.Font = 2 end); return t
+end
+local function newCircle()
+    local c = Drawing.new("Circle"); c.Thickness = 1.5; c.Color = C.White; c.Filled = false; c.Visible = false; c.Transparency = 1
+    pcall(function() c.NumSides = 30 end); return c
+end
+
+local function getDrawing(m)
+    local d = drawn[m]
+    if not d then
+        d = { skel = {}, headCirc = newCircle(), barBg = newLine(4, C.Black), bar = newLine(2, Color3.fromRGB(0,255,0)),
+              hpText = newText(), distText = newText(), nameText = newText() }
+        for i = 1, #SKEL_R15 do d.skel[i] = newLine(1, skelColor) end
+        drawn[m] = d
+    end
+    return d
+end
+
+local function hideDrawing(d)
+    for _, l in ipairs(d.skel) do l.Visible = false end
+    d.headCirc.Visible = false; d.barBg.Visible = false; d.bar.Visible = false
+    d.hpText.Visible = false; d.distText.Visible = false; d.nameText.Visible = false
+end
+
+local function destroyDrawing(m)
+    local d = drawn[m]; if not d then return end
+    for _, l in ipairs(d.skel) do pcall(function() l:Remove() end) end
+    pcall(function() d.headCirc:Remove() end); pcall(function() d.barBg:Remove() end)
+    pcall(function() d.bar:Remove() end); pcall(function() d.hpText:Remove() end)
+    pcall(function() d.distText:Remove() end); pcall(function() d.nameText:Remove() end)
+    drawn[m] = nil
+end
+
+local function renderESP()
+    cam = workspace.CurrentCamera or cam
+    local camPos = cam.CFrame.Position
+    local anyOn  = espDistance or espHealth or espSkeleton or espNames
+    local count  = 0
+
+    for model, hum in pairs(entities) do
+        local d    = drawn[model]
+        local drew = false
+
+        if anyOn then
+            local p, hrp, head, dispName, hasHead = describe(model, hum, false)
+            if hrp and (hrp.Position - camPos).Magnitude <= espRange then
+                local rp = cam:WorldToViewportPoint(hrp.Position)
+                if rp.Z > 0 then
+                    d = getDrawing(model); drew = true; count = count + 1
+                    local top = cam:WorldToViewportPoint(head.Position + Vector3.new(0, head.Size.Y/2 + 0.2, 0))
+                    local bot = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                    local h   = math.abs(bot.Y - top.Y)
+                    local w   = h / 2
+                    local cx  = rp.X
+
+                    -- skeleton
+                    local list = model:FindFirstChild("UpperTorso") and SKEL_R15 or SKEL_R6
+                    for i, line in ipairs(d.skel) do
+                        local pair = list[i]; local shown = false
+                        if espSkeleton and pair then
+                            local a = model:FindFirstChild(pair[1]); local b = model:FindFirstChild(pair[2])
+                            if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+                                local pa = cam:WorldToViewportPoint(a.Position)
+                                local pb = cam:WorldToViewportPoint(b.Position)
+                                if pa.Z > 0 and pb.Z > 0 then
+                                    line.From = Vector2.new(pa.X, pa.Y); line.To = Vector2.new(pb.X, pb.Y)
+                                    line.Color = skelColor; shown = true
+                                end
+                            end
+                        end
+                        line.Visible = shown
+                    end
+
+                    -- head circle (smaller than before: HEAD_SCALE)
+                    if espSkeleton and hasHead then
+                        local hp = cam:WorldToViewportPoint(head.Position)
+                        if hp.Z > 0 then
+                            local ht = cam:WorldToViewportPoint(head.Position + Vector3.new(0, head.Size.Y/2, 0))
+                            local hb = cam:WorldToViewportPoint(head.Position - Vector3.new(0, head.Size.Y/2, 0))
+                            local r = math.clamp((math.abs(ht.Y - hb.Y) / 2) * HEAD_SCALE, 2, 40)
+                            d.headCirc.Position = Vector2.new(hp.X, hp.Y)
+                            d.headCirc.Radius = r; d.headCirc.Color = skelColor; d.headCirc.Visible = true
+                        else d.headCirc.Visible = false end
+                    else d.headCirc.Visible = false end
+
+                    -- health bar
+                    if espHealth then
+                        local pct = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                        local x = cx - w/2 - 5
+                        d.barBg.From = Vector2.new(x, bot.Y+1); d.barBg.To = Vector2.new(x, top.Y-1)
+                        d.bar.From = Vector2.new(x, bot.Y); d.bar.To = Vector2.new(x, bot.Y - h*pct)
+                        d.bar.Color = Color3.fromHSV(pct/3, 1, 1)
+                        d.hpText.Text = tostring(math.ceil(hum.Health))
+                        d.hpText.Position = Vector2.new(x - 14, top.Y); d.hpText.Color = d.bar.Color
+                        d.barBg.Visible = true; d.bar.Visible = pct > 0; d.hpText.Visible = true
+                    else d.barBg.Visible = false; d.bar.Visible = false; d.hpText.Visible = false end
+
+                    -- distance
+                    if espDistance then
+                        local dist = (hrp.Position - camPos).Magnitude
+                        d.distText.Text = string.format("%d studs", math.floor(dist + 0.5))
+                        d.distText.Color = distColor
+                        d.distText.Position = Vector2.new(cx, bot.Y + 3); d.distText.Visible = true
+                    else d.distText.Visible = false end
+
+                    -- name (players: display name, NPCs: model name)
+                    if espNames then
+                        d.nameText.Text = dispName; d.nameText.Color = nameColor
+                        d.nameText.Position = Vector2.new(cx, top.Y - 18); d.nameText.Visible = true
+                    else d.nameText.Visible = false end
+                end
+            end
+        end
+        if not drew and d then hideDrawing(d) end
+    end
+    espCount = count
+end
+
+-- free drawings of entities that no longer exist
+task.spawn(function()
+    while task.wait(1) do
+        for m in pairs(drawn) do
+            if not entities[m] then destroyDrawing(m) end
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  UI  —  HELPERS
+-- ══════════════════════════════════════════════
+local function corner(obj, r)
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r); c.Parent = obj; return c
+end
+local function stroke(obj, key, t)
+    local s = Instance.new("UIStroke"); s.Thickness = t or 1
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = obj
+    bind(s, "Color", key or "Border"); return s
+end
+local function label(parent, text, size, key, font, xAlign)
+    local l = Instance.new("TextLabel"); l.BackgroundTransparency = 1; l.Text = text
+    l.TextSize = size; l.Font = font
+    l.TextXAlignment = xAlign or Enum.TextXAlignment.Left; l.Parent = parent
+    bind(l, "TextColor3", key); return l
+end
+
+local Log = {fn = function() end}
+local MONO = Enum.Font.RobotoMono
+local sectionCount = {}
+
+local function makeSection(parent, text, order)
+    sectionCount[parent] = (sectionCount[parent] or 0) + 1
+    local wrap = Instance.new("Frame")
+    wrap.Size = UDim2.new(1, 0, 0, 26); wrap.BackgroundTransparency = 1
+    wrap.LayoutOrder = order; wrap.Parent = parent
+
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1, 0, 0, 1); line.Position = UDim2.new(0, 0, 0.5, 0)
+    line.BackgroundTransparency = 0.45; line.BorderSizePixel = 0; line.Parent = wrap
+    bind(line, "BackgroundColor3", "Border")
+
+    local lbl = label(wrap, string.format("%02d / %s", sectionCount[parent], text), 10, "Muted", MONO)
+    lbl.AutomaticSize = Enum.AutomaticSize.X; lbl.Size = UDim2.new(0, 0, 1, 0)
+    lbl.BackgroundTransparency = 0
+    bind(lbl, "BackgroundColor3", "Bg")
+    local pad = Instance.new("UIPadding"); pad.PaddingLeft = UDim.new(0, 14); pad.PaddingRight = UDim.new(0, 8); pad.Parent = lbl
+
+    local mark = Instance.new("Frame")
+    mark.Size = UDim2.fromOffset(5, 5); mark.Position = UDim2.new(0, 2, 0.5, -2)
+    mark.BorderSizePixel = 0; mark.Rotation = 45; mark.ZIndex = 2; mark.Parent = wrap
+    bind(mark, "BackgroundColor3", "Accent")
+    return wrap
+end
+
+-- page header: mono eyebrow + title + sub line
+local function makeHeader(parent, eyebrow, titleText, sub, order)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 52); f.BackgroundTransparency = 1; f.LayoutOrder = order; f.Parent = parent
+    local e = label(f, eyebrow, 9, "Accent", MONO)
+    e.Size = UDim2.new(1, 0, 0, 12); e.Position = UDim2.new(0, 2, 0, 0)
+    local t = label(f, titleText, 17, "Text", Enum.Font.GothamBold)
+    t.Size = UDim2.new(1, 0, 0, 22); t.Position = UDim2.new(0, 2, 0, 12)
+    local sdesc = label(f, sub, 10, "Muted", Enum.Font.Gotham)
+    sdesc.Size = UDim2.new(1, 0, 0, 14); sdesc.Position = UDim2.new(0, 2, 0, 35)
+    return f
+end
+
+-- key / description row (INFO tab)
+local function makeKeyRow(parent, key, desc, order)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 30); row.BorderSizePixel = 0; row.LayoutOrder = order; row.Parent = parent
+    bind(row, "BackgroundColor3", "Surface"); corner(row, 8)
+    local chip = Instance.new("TextLabel")
+    chip.Size = UDim2.fromOffset(34, 20); chip.Position = UDim2.new(0, 6, 0.5, -10)
+    chip.BorderSizePixel = 0; chip.Text = key; chip.TextSize = 11; chip.Font = MONO; chip.Parent = row
+    bind(chip, "BackgroundColor3", "Bg"); bind(chip, "TextColor3", "Accent")
+    corner(chip, 5); stroke(chip, "Border", 1)
+    local d = label(row, desc, 11, "Text", Enum.Font.GothamMedium)
+    d.Size = UDim2.new(1, -52, 1, 0); d.Position = UDim2.new(0, 48, 0, 0)
+    return row
+end
+
+local function makeToggle(parent, text, default, order, callback)
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 36); row.BorderSizePixel = 0
+    row.AutoButtonColor = false; row.Text = ""; row.LayoutOrder = order; row.Parent = parent
+    bind(row, "BackgroundColor3", "Surface")
+    corner(row, 8)
+
+    local hoverStroke = stroke(row, "Border", 1)
+    hoverStroke.Transparency = 1
+
+    row.MouseEnter:Connect(function()
+        TweenService:Create(row, FAST, {BackgroundColor3 = C.Hover}):Play()
+        TweenService:Create(hoverStroke, FAST, {Transparency = 0, Color = C.Accent}):Play()
+    end)
+    row.MouseLeave:Connect(function()
+        TweenService:Create(row, FAST, {BackgroundColor3 = C.Surface}):Play()
+        TweenService:Create(hoverStroke, FAST, {Transparency = 1, Color = C.Border}):Play()
+    end)
+
+    local lbl = label(row, text, 12, "Text", Enum.Font.GothamMedium)
+    lbl.Size = UDim2.new(1, -64, 1, 0); lbl.Position = UDim2.new(0, 14, 0, 0)
+
+    local state = default
+
+    local statusDot = Instance.new("Frame")
+    statusDot.Size = UDim2.fromOffset(4, 4); statusDot.Position = UDim2.new(0, 6, 0.5, -2)
+    statusDot.BackgroundColor3 = state and C.Accent or C.Off
+    statusDot.BorderSizePixel = 0; statusDot.Parent = row
+    corner(statusDot, 2)
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0, 36, 0, 20); track.Position = UDim2.new(1, -48, 0.5, -10)
+    track.BackgroundColor3 = state and C.Accent or C.Off
+    track.BorderSizePixel = 0; track.Parent = row
+    corner(track, 10)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+    knob.BackgroundColor3 = C.White; knob.BorderSizePixel = 0; knob.Parent = track
+    corner(knob, 8)
+
+    local shadow = Instance.new("Frame")
+    shadow.Size = UDim2.new(1, 4, 1, 4); shadow.Position = UDim2.new(0, -2, 0, -1)
+    shadow.BackgroundColor3 = C.Black; shadow.BackgroundTransparency = 0.8
+    shadow.BorderSizePixel = 0; shadow.ZIndex = 0; shadow.Parent = knob
+    corner(shadow, 8)
+
+    local function setState(v, skipCb)
+        state = v
+        TweenService:Create(track, SMOOTH, {BackgroundColor3 = v and C.Accent or C.Off}):Play()
+        TweenService:Create(statusDot, SMOOTH, {BackgroundColor3 = v and C.Accent or C.Off}):Play()
+        TweenService:Create(knob, BOUNCE, {
+            Position = v and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        }):Play()
+        TweenService:Create(knob, TweenInfo.new(0.1), {Size = UDim2.new(0, 18, 0, 18)}):Play()
+        task.delay(0.1, function()
+            TweenService:Create(knob, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                {Size = UDim2.new(0, 16, 0, 16)}):Play()
+        end)
+        if not skipCb and callback then callback(v) end
+    end
+
+    row.MouseButton1Click:Connect(function() setState(not state); Log.fn(text .. (state and " enabled" or " disabled")) end)
+
+    local ref = {
+        setState = setState,
+        getState = function() return state end,
+        recolor  = function()   -- instant recolor on theme change (no animation)
+            track.BackgroundColor3     = state and C.Accent or C.Off
+            statusDot.BackgroundColor3 = state and C.Accent or C.Off
+        end,
+    }
+    toggleRefs[text] = ref
+    return ref
+end
+
+local function makeSlider(parent, text, min, max, default, order, callback, suffix)
+    suffix = suffix or ""
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 48); row.BorderSizePixel = 0; row.LayoutOrder = order; row.Parent = parent
+    bind(row, "BackgroundColor3", "Surface")
+    corner(row, 8)
+
+    local hoverStroke = stroke(row, "Border", 1)
+    hoverStroke.Transparency = 1
+
+    local lbl = label(row, text, 12, "Text", Enum.Font.GothamMedium)
+    lbl.Size = UDim2.new(0.6, 0, 0, 22); lbl.Position = UDim2.new(0, 14, 0, 4)
+
+    local val = label(row, tostring(default) .. suffix, 12, "Accent", Enum.Font.GothamBold, Enum.TextXAlignment.Right)
+    val.Size = UDim2.new(0.4, -14, 0, 22); val.Position = UDim2.new(0.6, 0, 0, 4)
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(1, -28, 0, 4); track.Position = UDim2.new(0, 14, 0, 34)
+    track.BorderSizePixel = 0; track.Parent = row
+    bind(track, "BackgroundColor3", "Off")
+    corner(track, 2)
+
+    local rel0 = (default - min) / (max - min)
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(rel0, 0, 1, 0); fill.BorderSizePixel = 0; fill.Parent = track
+    bind(fill, "BackgroundColor3", "Accent")
+    corner(fill, 2)
+
+    local fillGlow = Instance.new("Frame")
+    fillGlow.Size = UDim2.new(1, 0, 1, 6); fillGlow.Position = UDim2.new(0, 0, 0, -3)
+    fillGlow.BackgroundTransparency = 0.8; fillGlow.BorderSizePixel = 0; fillGlow.ZIndex = 0; fillGlow.Parent = fill
+    bind(fillGlow, "BackgroundColor3", "Accent")
+    corner(fillGlow, 3)
+
+    local knob = Instance.new("Frame")
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Size = UDim2.new(0, 14, 0, 14); knob.Position = UDim2.new(rel0, 0, 0.5, 0)
+    knob.BackgroundColor3 = C.White; knob.BorderSizePixel = 0; knob.ZIndex = 3; knob.Parent = track
+    corner(knob, 7)
+
+    local knobRing = stroke(knob, "Accent", 2)
+    knobRing.Transparency = 1
+
+    local function update(x)
+        local rel = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local v = math.floor(min + rel * (max - min) + 0.5)
+        TweenService:Create(fill, FAST, {Size = UDim2.new(rel, 0, 1, 0)}):Play()
+        TweenService:Create(knob, FAST, {Position = UDim2.new(rel, 0, 0.5, 0)}):Play()
+        val.Text = tostring(v) .. suffix
+        if callback then callback(v) end
+    end
+
+    local hit = Instance.new("TextButton")
+    hit.Size = UDim2.new(1, -12, 0, 24); hit.Position = UDim2.new(0, 6, 0, 24)
+    hit.BackgroundTransparency = 1; hit.Text = ""; hit.ZIndex = 4; hit.Parent = row
+
+    local dragging = false
+    hit.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; update(input.Position.X)
+            TweenService:Create(knob, FAST, {Size = UDim2.new(0, 18, 0, 18)}):Play()
+            TweenService:Create(knobRing, FAST, {Transparency = 0}):Play()
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            update(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            if dragging then
+                dragging = false
+                TweenService:Create(knob, BOUNCE, {Size = UDim2.new(0, 14, 0, 14)}):Play()
+                TweenService:Create(knobRing, FAST, {Transparency = 1}):Play()
+            end
+        end
+    end)
+
+    row.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            TweenService:Create(row, FAST, {BackgroundColor3 = C.Hover}):Play()
+            TweenService:Create(hoverStroke, FAST, {Transparency = 0, Color = C.Accent}):Play()
+        end
+    end)
+    row.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            TweenService:Create(row, FAST, {BackgroundColor3 = C.Surface}):Play()
+            TweenService:Create(hoverStroke, FAST, {Transparency = 1, Color = C.Border}):Play()
+        end
+    end)
+end
+
+local function makeButton(parent, text, order, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 34); btn.BorderSizePixel = 0; btn.AutoButtonColor = false
+    btn.Text = text; btn.TextSize = 12; btn.Font = Enum.Font.GothamBold
+    btn.LayoutOrder = order; btn.Parent = parent
+    bind(btn, "BackgroundColor3", "Surface"); bind(btn, "TextColor3", "Accent")
+    corner(btn, 8)
+    local s = stroke(btn, "Border", 1)
+
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, FAST, {BackgroundColor3 = C.Hover}):Play()
+        TweenService:Create(s, FAST, {Color = C.Accent}):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, FAST, {BackgroundColor3 = C.Surface}):Play()
+        TweenService:Create(s, FAST, {Color = C.Border}):Play()
+    end)
+    btn.MouseButton1Click:Connect(function()
+        TweenService:Create(btn, TweenInfo.new(0.06), {BackgroundColor3 = C.Accent, TextColor3 = C.White}):Play()
+        task.delay(0.12, function()
+            TweenService:Create(btn, SMOOTH, {BackgroundColor3 = C.Surface, TextColor3 = C.Accent}):Play()
+        end)
+        callback(btn)
+    end)
+    return btn
+end
+
+local function makeNote(parent, text, height, order)
+    local l = label(parent, text, 10, "Muted", Enum.Font.Gotham)
+    l.Size = UDim2.new(1, 0, 0, height); l.TextWrapped = true
+    l.TextYAlignment = Enum.TextYAlignment.Top; l.LayoutOrder = order; return l
+end
+
+-- ── colour helpers ──
+local function toHex(c)
+    return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+local function parseHex(s)
+    s = (s or ""):gsub("[#%s]", "")
+    if #s == 6 and s:match("^%x+$") then
+        return Color3.fromRGB(tonumber(s:sub(1, 2), 16), tonumber(s:sub(3, 4), 16), tonumber(s:sub(5, 6), 16))
+    end
+end
+local function sameColor(a, b)
+    return math.abs(a.R - b.R) < 0.004 and math.abs(a.G - b.G) < 0.004 and math.abs(a.B - b.B) < 0.004
+end
+
+-- colour row: palette dots + hex box. Returns {set = fn(color, silent)}
+local function makeColorRow(parent, text, order, getCurrent, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 60); row.BorderSizePixel = 0; row.LayoutOrder = order; row.Parent = parent
+    bind(row, "BackgroundColor3", "Surface")
+    corner(row, 8)
+
+    local preview = Instance.new("Frame")
+    preview.Size = UDim2.fromOffset(16, 16); preview.Position = UDim2.new(0, 12, 0, 6)
+    preview.BackgroundColor3 = getCurrent(); preview.BorderSizePixel = 0; preview.Parent = row
+    corner(preview, 5); stroke(preview, "Border", 1)
+
+    local lbl = label(row, text, 11, "Text", Enum.Font.GothamMedium)
+    lbl.Size = UDim2.new(1, -130, 0, 28); lbl.Position = UDim2.new(0, 34, 0, 0)
+
+    -- hex input
+    local hexBox = Instance.new("TextBox")
+    hexBox.Size = UDim2.fromOffset(72, 20); hexBox.Position = UDim2.new(1, -84, 0, 4)
+    hexBox.BorderSizePixel = 0; hexBox.ClearTextOnFocus = false
+    hexBox.Font = Enum.Font.GothamMedium; hexBox.TextSize = 10; hexBox.Text = toHex(getCurrent())
+    hexBox.PlaceholderText = "#RRGGBB"; hexBox.Parent = row
+    bind(hexBox, "BackgroundColor3", "Bg"); bind(hexBox, "TextColor3", "Text")
+    corner(hexBox, 5); stroke(hexBox, "Border", 1)
+
+    local dots, selected = {}, nil
+    local function mark(idx)
+        if selected and dots[selected] then
+            dots[selected].ring.Thickness = 0; dots[selected].check.Text = ""
+        end
+        selected = idx
+        if idx and dots[idx] then dots[idx].ring.Thickness = 2; dots[idx].check.Text = "✓" end
+    end
+
+    local api = {}
+    function api.set(col, silent)
+        preview.BackgroundColor3 = col
+        hexBox.Text = toHex(col)
+        local found
+        for i, pc in ipairs(PALETTE) do if sameColor(pc, col) then found = i break end end
+        mark(found)
+        if not silent then callback(col) end
+    end
+
+    for i, color in ipairs(PALETTE) do
+        local dot = Instance.new("TextButton")
+        dot.Size = UDim2.fromOffset(22, 22)
+        dot.Position = UDim2.new(0, 12 + (i - 1) * 28, 0, 32)
+        dot.BackgroundColor3 = color; dot.BorderSizePixel = 0
+        dot.Text = ""; dot.AutoButtonColor = false; dot.Parent = row
+        corner(dot, 11)
+
+        local ring = Instance.new("UIStroke")
+        ring.Color = C.White; ring.Thickness = 0
+        ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; ring.Parent = dot
+
+        local check = Instance.new("TextLabel")
+        check.Size = UDim2.new(1, 0, 1, 0); check.BackgroundTransparency = 1
+        check.Text = ""; check.TextSize = 11; check.Font = Enum.Font.GothamBold
+        check.TextColor3 = C.Black; check.Parent = dot
+        dots[i] = {ring = ring, check = check}
+
+        dot.MouseEnter:Connect(function()
+            TweenService:Create(dot, FAST, {Size = UDim2.fromOffset(26, 26),
+                Position = UDim2.new(0, 10 + (i-1)*28, 0, 30)}):Play()
+        end)
+        dot.MouseLeave:Connect(function()
+            TweenService:Create(dot, FAST, {Size = UDim2.fromOffset(22, 22),
+                Position = UDim2.new(0, 12 + (i-1)*28, 0, 32)}):Play()
+        end)
+        dot.MouseButton1Click:Connect(function() api.set(color) end)
+    end
+
+    hexBox.FocusLost:Connect(function()
+        local col = parseHex(hexBox.Text)
+        if col then api.set(col) else hexBox.Text = toHex(getCurrent()) end
+    end)
+
+    api.set(getCurrent(), true)
+    return api
+end
+
+-- ══════════════════════════════════════════════
+--  UI  —  WINDOW
+-- ══════════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name = "CHUB"; gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.IgnoreGuiInset = true
+
+pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
+pcall(function() gui.Parent = game:GetService("CoreGui") end)
+if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+
+local WIN_W, WIN_H, TITLE_H = 372, 530, 46
+local TAB_H, FOOT_H = 32, 50
+
+local win = Instance.new("Frame")
+win.Name = "Window"; win.Size = UDim2.fromOffset(WIN_W, WIN_H)
+win.Position = UDim2.new(0.5, -WIN_W/2, 0.2, 0)
+win.BorderSizePixel = 0; win.ClipsDescendants = true; win.Active = true; win.Parent = gui
+bind(win, "BackgroundColor3", "Bg")
+corner(win, 12)
+local winStroke = stroke(win, "Border", 1)
+
+-- entrance animation
+win.BackgroundTransparency = 1
+win.Size = UDim2.fromOffset(WIN_W * 0.85, WIN_H * 0.85)
+win.Position = UDim2.new(0.5, -WIN_W * 0.425, 0.2, 10)
+task.delay(0.05, function()
+    TweenService:Create(win, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0,
+        Size = UDim2.fromOffset(WIN_W, WIN_H),
+        Position = UDim2.new(0.5, -WIN_W/2, 0.2, 0),
+    }):Play()
+end)
+
+-- border glow pulse
+task.spawn(function()
+    while task.wait(3) do
+        TweenService:Create(winStroke, GENTLE, {Color = C.Accent}):Play()
+        task.wait(1.5)
+        TweenService:Create(winStroke, GENTLE, {Color = C.Border}):Play()
+    end
+end)
+
+-- soft accent wash at the top of the window
+local glow = Instance.new("Frame")
+glow.Size = UDim2.new(1, 0, 0, 120); glow.BackgroundTransparency = 0.9
+glow.BorderSizePixel = 0; glow.ZIndex = 0; glow.Parent = win
+bind(glow, "BackgroundColor3", "Accent")
+do
+    local g = Instance.new("UIGradient")
+    g.Rotation = 90
+    g.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(1, 1)})
+    g.Parent = glow
+end
+
+-- ═══ TITLE BAR ═══
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, TITLE_H); titleBar.BackgroundTransparency = 1; titleBar.Parent = win
+
+local accentLine = Instance.new("Frame")
+accentLine.Size = UDim2.new(1, 0, 0, 1); accentLine.Position = UDim2.new(0, 0, 0, TITLE_H)
+accentLine.BorderSizePixel = 0; accentLine.Parent = win
+bind(accentLine, "BackgroundColor3", "Accent")
+
+local grad = Instance.new("UIGradient")
+grad.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.6, 0), NumberSequenceKeypoint.new(1, 1),
+}); grad.Parent = accentLine
+
+task.spawn(function()
+    while task.wait(4) do
+        grad.Offset = Vector2.new(-1, 0)
+        TweenService:Create(grad, TweenInfo.new(2, Enum.EasingStyle.Sine), {Offset = Vector2.new(1, 0)}):Play()
+    end
+end)
+
+-- ═══ LOGO — wave + "C", built from UI pieces so every colour is themeable ═══
+local logo = Instance.new("Frame")
+logo.Size = UDim2.fromOffset(32, 32); logo.Position = UDim2.new(0, 12, 0.5, -16)
+logo.BorderSizePixel = 0; logo.ClipsDescendants = true; logo.Parent = titleBar
+bind(logo, "BackgroundColor3", "Logo")
+corner(logo, 15)
+do
+    local g = Instance.new("UIGradient")
+    g.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(150, 150, 150))
+    g.Rotation = 55; g.Parent = logo
+end
+
+local logoC = Instance.new("TextLabel")
+logoC.Size = UDim2.new(1, 0, 1, 0); logoC.Position = UDim2.new(0, -3, 0, -2)
+logoC.BackgroundTransparency = 1; logoC.Text = "C"; logoC.TextSize = 21
+logoC.Font = Enum.Font.GothamBlack; logoC.Parent = logo
+bind(logoC, "TextColor3", "LogoGlyph")
+
+-- little wave curl inside the C's opening
+local curl = Instance.new("Frame")
+curl.Size = UDim2.fromOffset(8, 8); curl.Position = UDim2.new(0, 16, 0, 10)
+curl.BackgroundTransparency = 1; curl.BorderSizePixel = 0; curl.Parent = logo
+corner(curl, 4); stroke(curl, "LogoGlyph", 2)
+
+local foam = Instance.new("Frame")
+foam.Size = UDim2.fromOffset(3, 3); foam.Position = UDim2.new(0, 22, 0, 6)
+foam.BorderSizePixel = 0; foam.Parent = logo
+bind(foam, "BackgroundColor3", "LogoGlyph"); corner(foam, 2)
+
+for i, wv in ipairs({{18, 4, 22}, {12, 9, 25}}) do
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.fromOffset(wv[1], 2); bar.Position = UDim2.new(0, wv[2], 0, wv[3])
+    bar.BackgroundTransparency = 0.45; bar.BorderSizePixel = 0; bar.Parent = logo
+    bind(bar, "BackgroundColor3", "LogoGlyph"); corner(bar, 1)
+end
+
+-- ═══ WAVE LOGO IMAGE — your original wave logo, embedded as a tintable image ═══
+-- (falls back to the built-in badge if the executor has no writefile / getcustomasset)
+local LOGO_B64 = "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"
+
+local function b64decode(data)
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local lookup = {}
+    for i = 1, #chars do lookup[chars:byte(i)] = i - 1 end
+    local out, buf, bits = {}, 0, 0
+    for i = 1, #data do
+        local v = lookup[data:byte(i)]
+        if v then
+            buf = buf * 64 + v; bits = bits + 6
+            if bits >= 8 then
+                bits = bits - 8
+                local byte = math.floor(buf / 2 ^ bits)
+                buf = buf - byte * 2 ^ bits
+                out[#out + 1] = string.char(byte)
+            end
+        end
+    end
+    return table.concat(out)
+end
+
+local logoImage
+pcall(function()
+    local getAsset = getcustomasset or getsynasset
+    assert(writefile and getAsset, "no file api")
+    local path = "CHUB_wave_logo_v2.png"
+    writefile(path, b64decode(LOGO_B64))
+    local img = Instance.new("ImageLabel")
+    img.Size = UDim2.new(1, 0, 1, 0); img.BackgroundTransparency = 1
+    img.ScaleType = Enum.ScaleType.Fit; img.Image = getAsset(path); img.Parent = logo
+    logoImage = img
+end)
+if logoImage then
+    logo.BackgroundTransparency = 1
+    for _, ch in ipairs(logo:GetChildren()) do
+        if ch ~= logoImage and ch:IsA("GuiObject") then ch.Visible = false end
+        if ch:IsA("UIGradient") then ch:Destroy() end
+    end
+    bind(logoImage, "ImageColor3", "Logo")   -- tint = Logo colour (shading is kept)
+end
+
+local title = label(titleBar, "C-HUB", 14, "Text", Enum.Font.GothamBold)
+title.Size = UDim2.new(0, 100, 1, 0); title.Position = UDim2.new(0, 52, 0, 0)
+title.TextSize = 15
+
+-- window buttons
+local function winBtn(symbol, fromRight, hoverCol)
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.fromOffset(28, 24); bg.Position = UDim2.new(1, -fromRight, 0.5, -12)
+    bg.BackgroundTransparency = 1; bg.BorderSizePixel = 0; bg.Parent = titleBar
+    bind(bg, "BackgroundColor3", "Surface"); corner(bg, 6)
+
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 1, 0); b.BackgroundTransparency = 1
+    b.Text = symbol; b.TextSize = 14; b.Font = Enum.Font.GothamBold; b.Parent = bg
+    bind(b, "TextColor3", "Muted")
+
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b, FAST, {TextColor3 = hoverCol}):Play()
+        TweenService:Create(bg, FAST, {BackgroundTransparency = 0}):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b, FAST, {TextColor3 = C.Muted}):Play()
+        TweenService:Create(bg, FAST, {BackgroundTransparency = 1}):Play()
+    end)
+    return b
+end
+
+local closeBtn = winBtn("×", 38, Color3.fromRGB(235, 70, 70))
+local minBtn   = winBtn("–", 70, C.Accent)
+
+-- ═══ TABS (segmented control) ═══
+local TAB_NAMES = {"AIM", "ESP", "STYLE", "INFO"}
+local currentTab = 1
+local tabBtns, tabPages = {}, {}
+
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -24, 0, TAB_H); tabBar.Position = UDim2.new(0, 12, 0, TITLE_H + 10)
+tabBar.BorderSizePixel = 0; tabBar.Parent = win
+bind(tabBar, "BackgroundColor3", "Surface"); corner(tabBar, 9); stroke(tabBar, "Border", 1)
+
+local tabIndicator = Instance.new("Frame")
+tabIndicator.Size = UDim2.new(1 / #TAB_NAMES, -6, 1, -6)
+tabIndicator.Position = UDim2.new(0, 3, 0, 3); tabIndicator.BorderSizePixel = 0; tabIndicator.Parent = tabBar
+bind(tabIndicator, "BackgroundColor3", "Hover"); corner(tabIndicator, 7); stroke(tabIndicator, "Accent", 1)
+
+local CONTENT_Y = TITLE_H + 10 + TAB_H + 10
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -24, 1, -(CONTENT_Y + FOOT_H + 4))
+content.Position = UDim2.new(0, 12, 0, CONTENT_Y)
+content.BackgroundTransparency = 1; content.ClipsDescendants = true; content.Parent = win
+
+-- footer: live status chips + a one-line event log
+local footer = Instance.new("Frame")
+footer.Size = UDim2.new(1, 0, 0, FOOT_H); footer.Position = UDim2.new(0, 0, 1, -FOOT_H)
+footer.BorderSizePixel = 0; footer.Parent = win
+bind(footer, "BackgroundColor3", "Surface")
+do
+    local topLine = Instance.new("Frame")
+    topLine.Size = UDim2.new(1, 0, 0, 1); topLine.BorderSizePixel = 0; topLine.Parent = footer
+    bind(topLine, "BackgroundColor3", "Border")
+end
+
+local chipRow = Instance.new("Frame")
+chipRow.Size = UDim2.new(1, -24, 0, 18); chipRow.Position = UDim2.new(0, 12, 0, 7)
+chipRow.BackgroundTransparency = 1; chipRow.Parent = footer
+do
+    local l = Instance.new("UIListLayout")
+    l.FillDirection = Enum.FillDirection.Horizontal; l.Padding = UDim.new(0, 5)
+    l.SortOrder = Enum.SortOrder.LayoutOrder; l.Parent = chipRow
+end
+local function makeFooterChip(order)
+    local c = Instance.new("TextLabel")
+    c.AutomaticSize = Enum.AutomaticSize.X; c.Size = UDim2.new(0, 0, 1, 0)
+    c.BorderSizePixel = 0; c.Font = MONO; c.TextSize = 9; c.Text = ""
+    c.LayoutOrder = order; c.Parent = chipRow
+    bind(c, "BackgroundColor3", "Bg"); bind(c, "TextColor3", "Muted")
+    local p = Instance.new("UIPadding"); p.PaddingLeft = UDim.new(0, 7); p.PaddingRight = UDim.new(0, 7); p.Parent = c
+    corner(c, 5); stroke(c, "Border", 1)
+    return c
+end
+local chipAim, chipTrigger, chipTargets, chipEsp, chipZone = makeFooterChip(1), makeFooterChip(2), makeFooterChip(3), makeFooterChip(4), makeFooterChip(5)
+
+local logLabel = label(footer, "", 9, "Muted", MONO)
+logLabel.Size = UDim2.new(1, -24, 0, 14); logLabel.Position = UDim2.new(0, 12, 0, 30)
+logLabel.TextTruncate = Enum.TextTruncate.AtEnd
+Log.fn = function(msg)
+    logLabel.Text = string.format("› [%s]  %s", os.date("%H:%M:%S"), msg)
+end
+Log.fn("C-HUB loaded")
+
+local function paintTabs()
+    for n = 1, #TAB_NAMES do
+        tabBtns[n].TextColor3 = (n == currentTab) and C.Accent or C.Muted
+    end
+end
+table.insert(themeHooks, paintTabs)
+
+for i, name in ipairs(TAB_NAMES) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1 / #TAB_NAMES, 0, 1, 0)
+    btn.Position = UDim2.new((i - 1) / #TAB_NAMES, 0, 0, 0)
+    btn.BackgroundTransparency = 1; btn.Text = name; btn.TextSize = 11
+    btn.Font = Enum.Font.GothamBold; btn.ZIndex = 2
+    btn.TextColor3 = (i == 1) and C.Accent or C.Muted
+    btn.Parent = tabBar
+    tabBtns[i] = btn
+
+    local page = Instance.new("ScrollingFrame")
+    page.Size = UDim2.new(1, 0, 1, 0); page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0; page.ScrollBarThickness = 2
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y; page.Visible = (i == 1)
+    page.Parent = content
+    bind(page, "ScrollBarImageColor3", "Accent")
+    tabPages[i] = page
+
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder; layout.Padding = UDim.new(0, 5); layout.Parent = page
+    local pad = Instance.new("UIPadding"); pad.PaddingRight = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 8); pad.Parent = page
+
+    btn.MouseButton1Click:Connect(function()
+        if i == currentTab then return end
+        currentTab = i
+        TweenService:Create(tabIndicator, SMOOTH, {Position = UDim2.new((i - 1) / #TAB_NAMES, 3, 0, 3)}):Play()
+        for n = 1, #TAB_NAMES do
+            local active = (n == i)
+            TweenService:Create(tabBtns[n], SMOOTH, {TextColor3 = active and C.Accent or C.Muted}):Play()
+            if active then
+                tabPages[n].CanvasPosition = Vector2.new(0, 0)
+                tabPages[n].Position = UDim2.new(0.04, 0, 0, 0)
+                tabPages[n].Visible = true
+                TweenService:Create(tabPages[n], SMOOTH, {Position = UDim2.new(0, 0, 0, 0)}):Play()
+            else
+                tabPages[n].Visible = false
+            end
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  PAGE: AIM
+-- ══════════════════════════════════════════════
+local ap = tabPages[1]
+makeHeader(ap, "C-HUB / AIM", "Aim assist", "Lock-on, smoothing and target filters.", 0)
+makeSection(ap, "AIMBOT", 1)
+makeToggle(ap, "Aim Lock", aiming, 2, function(s) aiming = s end)
+makeToggle(ap, "TriggerBot", triggerbotEnabled, 3, function(s)
+    triggerbotEnabled = s
+    if s then
+        showTempMessage("Triggerbot activated", Color3.fromRGB(75, 230, 75))
+    else
+        showTempMessage("Triggerbot deactivated", Color3.fromRGB(255, 55, 55))
+    end
+    Log.fn("TriggerBot " .. (s and "enabled" or "disabled"))
+end)
+makeToggle(ap, "Aim at Body", aimBody, 4, function(s) aimBody = s end)
+makeToggle(ap, "Target NPCs", aimNPCs, 5, function(s) aimNPCs = s end)
+makeToggle(ap, "FOV Circle", fovEnabled, 6, function(s) fovEnabled = s; fovCircle.Visible = s end)
+makeSlider(ap, "FOV Radius", 30, 1000, fovRadius, 7, function(v) fovRadius = v; fovCircle.Radius = v end)
+makeSlider(ap, "Smoothness", 5, 100, aimSmooth, 8, function(v) aimSmooth = v end)
+
+makeSection(ap, "TARGET FILTER", 8)
+makeSlider(ap, "Max Distance", 50, 2000, maxDistance, 9, function(v) maxDistance = v end, " st")
+makeSlider(ap, "Zone Radius", 50, 2000, zoneRadius, 10, function(v) zoneRadius = v end, " st")
+makeToggle(ap, "Combat Zone Only", zoneEnabled, 11, function(s)
+    zoneEnabled = s
+    if s and not zoneCenter then
+        local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then zoneCenter = hrp.Position end
+    end
+end)
+makeButton(ap, "SET ZONE CENTER", 12, function(btn)
+    local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        zoneCenter = hrp.Position
+        btn.Text = "ZONE CENTER SAVED ✓"; Log.fn("Zone center saved")
+    else
+        btn.Text = "NO CHARACTER FOUND"
+    end
+    task.delay(1.5, function() btn.Text = "SET ZONE CENTER" end)
+end)
+
+-- ══════════════════════════════════════════════
+--  PAGE: ESP
+-- ══════════════════════════════════════════════
+local ep = tabPages[2]
+makeHeader(ep, "C-HUB / ESP", "Visuals", "Players and NPCs within your range.", 0)
+makeSection(ep, "DETECTION", 1)
+makeToggle(ep, "Detect NPCs / Humanoids", detectNPCs, 2, function(s) detectNPCs = s end)
+makeSlider(ep, "ESP Range", 50, 5000, espRange, 3, function(v) espRange = v end, " st")
+makeSection(ep, "ENEMY ESP", 4)
+makeToggle(ep, "Charms", charmEnabled, 5, function(s)
+    charmEnabled = s; if not s then clearAllESP() end
+end)
+makeToggle(ep, "Display Name", espNames, 6, function(s) espNames = s end)
+makeToggle(ep, "Distance", espDistance, 7, function(s) espDistance = s end)
+makeToggle(ep, "Health", espHealth, 8, function(s) espHealth = s end)
+makeToggle(ep, "Skeleton", espSkeleton, 9, function(s) espSkeleton = s end)
+makeNote(ep, "Every Humanoid within ESP Range is tracked — real players and NPCs/bots (turn NPCs off above). Health fades green → red. Teammates are hidden. Charms are capped at the 31 nearest targets (Roblox limit).", 62, 10)
+
+-- ══════════════════════════════════════════════
+--  PAGE: STYLE  (everything here is colour-only)
+-- ══════════════════════════════════════════════
+local sp = tabPages[3]
+local rows = {}
+local logoCustom = false
+
+local function themeRow(text, order, key, after)
+    rows[key] = makeColorRow(sp, text, order, function() return C[key] end, function(col)
+        C[key] = col; applyTheme()
+        if after then after(col) end
+    end)
+end
+local function espRow(text, order, get, set)
+    return makeColorRow(sp, text, order, get, set)
+end
+
+-- presets
+local PRESETS = {
+    {"Ocean",   {Accent=Color3.fromRGB(68,162,249),  Bg=Color3.fromRGB(12,12,16),   Surface=Color3.fromRGB(20,20,26),    Hover=Color3.fromRGB(34,34,44),    Border=Color3.fromRGB(38,38,48),    Text=Color3.fromRGB(240,240,245), Muted=Color3.fromRGB(100,100,115), Off=Color3.fromRGB(46,46,56)}},
+    {"Crimson", {Accent=Color3.fromRGB(235,64,82),   Bg=Color3.fromRGB(14,10,12),   Surface=Color3.fromRGB(24,17,20),    Hover=Color3.fromRGB(38,26,31),    Border=Color3.fromRGB(50,34,40),    Text=Color3.fromRGB(245,238,240), Muted=Color3.fromRGB(120,100,106), Off=Color3.fromRGB(56,44,48)}},
+    {"Emerald", {Accent=Color3.fromRGB(52,211,153),  Bg=Color3.fromRGB(9,14,13),    Surface=Color3.fromRGB(16,24,22),    Hover=Color3.fromRGB(25,38,35),    Border=Color3.fromRGB(33,50,46),    Text=Color3.fromRGB(236,247,243), Muted=Color3.fromRGB(96,120,112),  Off=Color3.fromRGB(40,56,52)}},
+    {"Violet",  {Accent=Color3.fromRGB(150,100,255), Bg=Color3.fromRGB(13,11,20),   Surface=Color3.fromRGB(21,18,32),    Hover=Color3.fromRGB(33,28,50),    Border=Color3.fromRGB(44,38,66),    Text=Color3.fromRGB(242,239,250), Muted=Color3.fromRGB(110,104,135), Off=Color3.fromRGB(50,45,70)}},
+    {"Amoled",  {Accent=Color3.fromRGB(68,162,249),  Bg=Color3.fromRGB(0,0,0),      Surface=Color3.fromRGB(10,10,12),    Hover=Color3.fromRGB(22,22,26),    Border=Color3.fromRGB(30,30,36),    Text=Color3.fromRGB(245,245,248), Muted=Color3.fromRGB(110,110,122), Off=Color3.fromRGB(38,38,46)}},
+    {"Snow",    {Accent=Color3.fromRGB(40,120,230),  Bg=Color3.fromRGB(242,245,250),Surface=Color3.fromRGB(255,255,255), Hover=Color3.fromRGB(230,236,246), Border=Color3.fromRGB(208,215,228), Text=Color3.fromRGB(24,28,40),    Muted=Color3.fromRGB(112,120,138), Off=Color3.fromRGB(204,210,222)}},
+}
+local THEME_KEYS = {"Accent","Bg","Surface","Hover","Border","Text","Muted","Off","Logo","LogoGlyph","Version"}
+
+makeHeader(sp, "C-HUB / STYLE", "Appearance", "Colors only — everything updates live.", 0)
+makeSection(sp, "THEME PRESETS", 1)
+local presetGrid = Instance.new("Frame")
+presetGrid.Size = UDim2.new(1, 0, 0, 62); presetGrid.BackgroundTransparency = 1
+presetGrid.LayoutOrder = 2; presetGrid.Parent = sp
+do
+    local gl = Instance.new("UIGridLayout")
+    gl.CellSize = UDim2.new(1/3, -4, 0, 28); gl.CellPadding = UDim2.fromOffset(6, 6)
+    gl.SortOrder = Enum.SortOrder.LayoutOrder; gl.Parent = presetGrid
+end
+for i, pr in ipairs(PRESETS) do
+    local pb = Instance.new("TextButton")
+    pb.BorderSizePixel = 0; pb.AutoButtonColor = false; pb.Text = pr[1]
+    pb.TextSize = 11; pb.Font = Enum.Font.GothamBold; pb.LayoutOrder = i; pb.Parent = presetGrid
+    bind(pb, "BackgroundColor3", "Surface"); bind(pb, "TextColor3", "Text")
+    corner(pb, 7); stroke(pb, "Border", 1)
+    local swatch = Instance.new("Frame")
+    swatch.Size = UDim2.fromOffset(6, 6); swatch.Position = UDim2.new(0, 8, 0.5, -3)
+    swatch.BackgroundColor3 = pr[2].Accent; swatch.BorderSizePixel = 0; swatch.Parent = pb
+    corner(swatch, 3)
+    pb.MouseButton1Click:Connect(function()
+        for k, v in pairs(pr[2]) do C[k] = v end
+        C.Logo = pr[2].Accent; C.LogoGlyph = Color3.fromRGB(255, 255, 255); C.Version = pr[2].Muted
+        logoCustom = false
+        applyTheme()
+        for _, k in ipairs(THEME_KEYS) do if rows[k] then rows[k].set(C[k], true) end end
+    end)
+end
+
+makeSection(sp, "INTERFACE", 3)
+themeRow("Accent Color",   4,  "Accent", function(col)
+    if not logoCustom then
+        C.Logo = col; applyTheme(); rows.Logo.set(col, true)
+    end
+end)
+themeRow("Background",     5,  "Bg")
+themeRow("Panels",         6,  "Surface")
+themeRow("Hover",          7,  "Hover")
+themeRow("Borders",        8,  "Border")
+themeRow("Text",           9,  "Text")
+themeRow("Muted Text",     10, "Muted")
+themeRow("Toggle Off",     11, "Off")
+
+makeSection(sp, "LOGO & VERSION", 12)
+if logoImage then
+    -- wave image: one colour row recolours the whole logo (shading is kept)
+    themeRow("Logo Color", 13, "Logo", function() logoCustom = true end)
+else
+    themeRow("Logo Badge",       13, "Logo",      function() logoCustom = true end)
+    themeRow("Logo Letter/Wave", 14, "LogoGlyph")
+end
+themeRow("Version Text",    15, "Version")
+
+makeSection(sp, "AIMBOT", 16)
+espRow("FOV Circle", 17, function() return fovColor end, function(col) fovColor = col; fovCircle.Color = col end)
+
+makeSection(sp, "ESP COLORS", 18)
+espRow("Skeleton",       19, function() return skelColor end,       function(col) skelColor = col end)
+espRow("Charms Fill",    20, function() return charmsFillColor end, function(col) charmsFillColor = col end)
+espRow("Charms Outline", 21, function() return charmsOutColor end,  function(col) charmsOutColor = col end)
+espRow("Name Tags",      22, function() return nameColor end,       function(col) nameColor = col end)
+espRow("Distance Text",  23, function() return distColor end,       function(col) distColor = col end)
+
+makeNote(sp, "Colours apply live. Pick a swatch or type any hex like #44A2F9. Presets reset the interface colours (ESP colours are kept).", 40, 24)
+
+-- ══════════════════════════════════════════════
+--  PAGE: INFO
+-- ══════════════════════════════════════════════
+local ip = tabPages[4]
+makeHeader(ip, "C-HUB / INFO", "Controls", "Keybinds, credits and version.", 0)
+makeSection(ip, "KEYBINDS", 1)
+makeKeyRow(ip, "=",   "Aim Lock on / off", 2)
+makeKeyRow(ip, "-",   "FOV circle", 3)
+makeKeyRow(ip, "]",   "ESP charms", 4)
+makeKeyRow(ip, "[",   "Aim part (Head / Body)", 5)
+makeKeyRow(ip, "L",   "Show / hide this window", 6)
+makeSection(ip, "CREDITS", 7)
+
+local creditCard = Instance.new("Frame")
+creditCard.Size = UDim2.new(1, 0, 0, 50); creditCard.BorderSizePixel = 0
+creditCard.LayoutOrder = 8; creditCard.Parent = ip
+bind(creditCard, "BackgroundColor3", "Surface"); corner(creditCard, 8)
+
+local creditAccent = Instance.new("Frame")
+creditAccent.Size = UDim2.new(0, 3, 0.6, 0); creditAccent.Position = UDim2.new(0, 0, 0.2, 0)
+creditAccent.BorderSizePixel = 0; creditAccent.Parent = creditCard
+bind(creditAccent, "BackgroundColor3", "Accent"); corner(creditAccent, 2)
+
+local creditTitle = label(creditCard, "Made by CDev", 13, "Text", Enum.Font.GothamBold)
+creditTitle.Size = UDim2.new(1, -20, 0, 22); creditTitle.Position = UDim2.new(0, 14, 0, 6)
+
+local creditSub = label(creditCard, "C-HUB", 10, "Muted", Enum.Font.Gotham)
+creditSub.Size = UDim2.new(1, -20, 0, 16); creditSub.Position = UDim2.new(0, 14, 0, 28)
+
+-- version — very bottom of INFO, same font as the credits text
+local versionText = label(ip, "Version " .. VERSION, 10, "Version", Enum.Font.Gotham)
+versionText.Size = UDim2.new(1, 0, 0, 20); versionText.LayoutOrder = 9
+versionText.TextXAlignment = Enum.TextXAlignment.Center
+
+-- ══════════════════════════════════════════════
+--  SHOW / HIDE / MINIMIZE
+-- ══════════════════════════════════════════════
+local function setVisible(v)
+    uiVisible = v
+    if v then
+        win.Visible = true; win.BackgroundTransparency = 1
+        win.Size = UDim2.fromOffset(WIN_W * 0.9, WIN_H * 0.9)
+        TweenService:Create(win, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(WIN_W, minimized and TITLE_H or WIN_H),
+            BackgroundTransparency = 0,
+        }):Play()
+    else
+        TweenService:Create(win, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+            Size = UDim2.fromOffset(WIN_W * 0.9, (minimized and TITLE_H or WIN_H) * 0.9),
+            BackgroundTransparency = 1,
+        }):Play()
+        task.delay(0.2, function() if not uiVisible then win.Visible = false end end)
+    end
+end
+
+local function setMinimized(m)
+    minimized = m
+    minBtn.Text = m and "+" or "–"
+    tabBar.Visible = not m; content.Visible = not m; footer.Visible = not m; accentLine.Visible = not m
+    TweenService:Create(win, SMOOTH, {Size = UDim2.fromOffset(WIN_W, m and TITLE_H or WIN_H)}):Play()
+end
+
+closeBtn.MouseButton1Click:Connect(function() setVisible(false) end)
+minBtn.MouseButton1Click:Connect(function() setMinimized(not minimized) end)
+
+-- dragging
+do
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, win.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                     startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  KEYBINDS
+-- ══════════════════════════════════════════════
+local function syncUI()
+    local map = {
+        ["Aim Lock"]    = aiming,
+        ["TriggerBot"]  = triggerbotEnabled,
+        ["Aim at Body"] = aimBody,
+        ["FOV Circle"]  = fovEnabled,
+        ["Charms"]      = charmEnabled,
+    }
+    for name, v in pairs(map) do
+        if toggleRefs[name] then toggleRefs[name].setState(v, true) end
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.Minus then
+        fovEnabled = not fovEnabled; fovCircle.Visible = fovEnabled; syncUI(); Log.fn("FOV Circle " .. (fovEnabled and "enabled" or "disabled"))
+    elseif input.KeyCode == Enum.KeyCode.RightBracket then
+        charmEnabled = not charmEnabled; if not charmEnabled then clearAllESP() end; syncUI(); Log.fn("Charms " .. (charmEnabled and "enabled" or "disabled"))
+    elseif input.KeyCode == Enum.KeyCode.LeftBracket then
+        aimBody = not aimBody; syncUI(); Log.fn("Aim part: " .. (aimBody and "Body" or "Head"))
+    end
+end)
+
+do
+    local lastL, lastEq = false, false
+    RunService.Heartbeat:Connect(function()
+        local typing = UserInputService:GetFocusedTextBox() ~= nil
+        local l  = UserInputService:IsKeyDown(Enum.KeyCode.L)
+        local eq = UserInputService:IsKeyDown(Enum.KeyCode.Equals)
+        if not typing then
+            if l and not lastL then setVisible(not uiVisible) end
+            if eq and not lastEq then aiming = not aiming; syncUI(); Log.fn("Aim Lock " .. (aiming and "enabled" or "disabled")) end
+        end
+        lastL, lastEq = l, eq
+    end)
+end
+
+UserInputService.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        mouseDeltaAcc = mouseDeltaAcc + input.Delta.Magnitude
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  AIM LOOP
+-- ══════════════════════════════════════════════
+pcall(function() RunService:UnbindFromRenderStep("CHubAim") end)
+pcall(function() RunService:UnbindFromRenderStep("CHubESP") end)
+
+RunService:BindToRenderStep("CHubAim", Enum.RenderPriority.Camera.Value + 1, function(dt)
+    cam = workspace.CurrentCamera or cam
+    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    local targets = getValidTargets()
+    targetCount = #targets
+    local now = os.clock()
+
+    if mouseDeltaAcc > 8 then manualUntil = now + 0.1 end
+    mouseDeltaAcc = 0
+
+    local best, bestD = nil, math.huge
+    for _, t in ipairs(targets) do
+        if t.screenDist < bestD then bestD = t.screenDist; best = t end
+    end
+
+    if aiming and best and now >= manualUntil then
+        local goal  = CFrame.new(cam.CFrame.Position, best.part.Position)
+        local alpha = 1 - (1 - math.clamp(aimSmooth / 100, 0.01, 1)) ^ (math.clamp(dt, 0, 0.1) * 60)
+        cam.CFrame  = cam.CFrame:Lerp(goal, alpha)
+    end
+
+    -- TriggerBot: Instant Head-Lock & Shoot (Zero-Delay)
+    if triggerbotEnabled then
+        local tModel, tHead = getCrosshairTarget()
+        if tModel and tHead then
+            cam.CFrame = CFrame.new(cam.CFrame.Position, tHead.Position)
+            if now - lastTriggerShot >= 0.05 then
+                lastTriggerShot = now
+                if mouse1click then
+                    mouse1click()
+                elseif mouse1press and mouse1release then
+                    mouse1press()
+                    task.defer(mouse1release)
+                end
+            end
+        end
+    end
+end)
+
+RunService:BindToRenderStep("CHubESP", Enum.RenderPriority.Camera.Value + 2, function()
+    pcall(renderESP)
+end)
+
+-- ══════════════════════════════════════════════
+--  BACKGROUND LOOP  (highlights + footer)
+-- ══════════════════════════════════════════════
+task.spawn(function()
+    local function chip(c, text, active)
+        c.Text = text
+        c.TextColor3 = active and C.Accent or C.Muted
+    end
+    while task.wait(0.1) do
+        pcall(updateHighlights)
+        chip(chipAim,     "AIM " .. (aiming and "ON" or "OFF"), aiming)
+        chip(chipTrigger, "TRIG " .. (triggerbotEnabled and "ON" or "OFF"), triggerbotEnabled)
+        chip(chipTargets, "TGT " .. targetCount, targetCount > 0)
+        chip(chipEsp,     "ESP " .. espCount, espCount > 0)
+        chip(chipZone,    "ZONE " .. ((zoneEnabled and zoneCenter) and "ON" or "OFF"), zoneEnabled and zoneCenter ~= nil)
     end
 end)
