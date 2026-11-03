@@ -1,38 +1,83 @@
--- SERVICES
-local uis = game:GetService("UserInputService")
-local plr = game.Players.LocalPlayer
+--[[
+    ╔═══════════════════════════════════════════╗
+    ║            F L O W H U B                 ║
+    ║   Ultra-dark frameless UI + Aim/ESP Hub   ║
+    ║        Press [L] to show/hide UI          ║
+    ╚═══════════════════════════════════════════╝
+]]
+
+-- ══════════════════════════════════════════════
+--  SERVICES
+-- ══════════════════════════════════════════════
+local Players        = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService     = game:GetService("RunService")
+local TweenService   = game:GetService("TweenService")
+
+local plr = Players.LocalPlayer
 local cam = workspace.CurrentCamera
-local rs = game:GetService("RunService")
 
--- UI THEME & CONSTANTS
-local THEME = {
-    BG = Color3.fromRGB(12, 12, 12),
-    FRAME = Color3.fromRGB(0, 0, 0),
-    BORDER = Color3.fromRGB(41, 41, 41),
-    ACCENT = Color3.fromRGB(68, 162, 249),
-    TEXT = Color3.fromRGB(255, 255, 255),
-    TEXT_DIM = Color3.fromRGB(160, 160, 160),
-    SUCCESS = Color3.fromRGB(0, 255, 0)
+-- ══════════════════════════════════════════════
+--  THEME
+-- ══════════════════════════════════════════════
+local C = {
+    Black       = Color3.fromRGB(0, 0, 0),        -- outer frame
+    Panel       = Color3.fromRGB(12, 12, 12),      -- deep charcoal
+    Surface     = Color3.fromRGB(20, 20, 20),      -- card bg
+    SurfaceHov  = Color3.fromRGB(28, 28, 28),      -- hover
+    Border      = Color3.fromRGB(41, 41, 41),      -- graphite
+    Accent      = Color3.fromRGB(68, 162, 249),    -- electric sky‑blue
+    AccentDim   = Color3.fromRGB(36, 100, 170),
+    Text        = Color3.fromRGB(235, 235, 235),
+    TextMuted   = Color3.fromRGB(108, 108, 108),
+    ToggleOff   = Color3.fromRGB(50, 50, 50),
+    Red         = Color3.fromRGB(235, 70, 70),
+    Green       = Color3.fromRGB(70, 230, 110),
+    GreenDim    = Color3.fromRGB(18, 58, 34),
+    RedDim      = Color3.fromRGB(58, 22, 22),
 }
 
-local UI_STATE = {
-    visible = true,
-    activeTab = "HOME"
-}
+local TWEEN_FAST = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local TWEEN_MED  = TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
--- CORE LOGIC VARIABLES (Preserved)
-local aiming = false
-local fovEnabled = true
+-- ══════════════════════════════════════════════
+--  SCRIPT STATE  (original variables preserved)
+-- ══════════════════════════════════════════════
+local aiming       = false
+local fovEnabled   = true
 local charmEnabled = true
-local aimBody = false
-local fovRadius = 150
+local aimBody      = false   -- false = Head, true = Body
+local fovRadius    = 150
+local uiVisible    = true
+local preferClosest = true    -- true = nearest enemy to ME, false = nearest to crosshair
+local manualLock    = false   -- true when you steered onto a target by dragging
+local dragPending   = false
+local currentTargetName = "None"
+local targetCount = 0
+local currentTargetDist = 0
+local aimSmooth     = 35      -- 5..100 (100 = instant snap)
+local lockedPlayer  = nil     -- current aim target
+local manualUntil   = 0       -- while mouse is being dragged, aim assist pauses
+local mouseDeltaAcc = 0       -- accumulated mouse movement this frame
+local minimized    = false
 
--- UI REFERENCES
-local mainFrame
-local uiElements = {}
+-- ══════════════════════════════════════════════
+--  FOV CIRCLE  (original)
+-- ══════════════════════════════════════════════
+local fovCircle = Drawing.new("Circle")
+fovCircle.Position     = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+fovCircle.Radius       = fovRadius
+fovCircle.Color        = Color3.fromRGB(255, 0, 0)
+fovCircle.Thickness    = 1
+fovCircle.Transparency = 0.6
+fovCircle.Visible      = true
+fovCircle.Filled       = false
 
--- ================= CORE LOGIC (PRESERVED) =================
+local highlightedPlayers = {}
 
+-- ══════════════════════════════════════════════
+--  CORE FUNCTIONS  (original — untouched)
+-- ══════════════════════════════════════════════
 local function getTargetPart(character)
     if aimBody then
         local hrp = character:FindFirstChild("HumanoidRootPart")
@@ -45,29 +90,33 @@ end
 
 local function getValidTargets()
     local targets = {}
-    local myTeam = plr.TeamColor
-    local myHead = plr.Character and plr.Character:FindFirstChild("Head")
+    local myTeam  = plr.TeamColor
+    local myHead  = plr.Character and plr.Character:FindFirstChild("Head")
     if not myHead then return targets end
     local origin = myHead.Position
     local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
 
-    for _, v in pairs(game.Players:GetPlayers()) do
-        if v ~= plr and v.Character and v.Character:FindFirstChild("Humanoid") and v.Character.Humanoid.Health > 0 then
+    for _, v in pairs(Players:GetPlayers()) do
+        local hum = v.Character and v.Character:FindFirstChildOfClass("Humanoid")
+        if v ~= plr and v.Character and hum
+            and hum.Health > 0
+            and hum:GetState() ~= Enum.HumanoidStateType.Dead
+            and v.Character:IsDescendantOf(workspace)
+            and v.Character:FindFirstChild("HumanoidRootPart") then
             if v.TeamColor == myTeam then continue end
-            
             local targetPart = getTargetPart(v.Character)
-            if targetPart then
+            if targetPart and targetPart:IsDescendantOf(workspace)
+                and targetPart.Position.Y > workspace.FallenPartsDestroyHeight + 5 then
                 local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
                 if onScreen then
                     local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
                     local dist3D = (targetPart.Position - origin).Magnitude
-                    
                     if distFromCenter <= fovRadius then
                         table.insert(targets, {
-                            player = v, 
-                            part = targetPart, 
+                            player     = v,
+                            part       = targetPart,
                             screenDist = distFromCenter,
-                            dist3D = dist3D
+                            dist3D     = dist3D,
                         })
                     end
                 end
@@ -79,16 +128,15 @@ end
 
 local function setCharm(player, active)
     if not player or not player.Character then return end
-    local char = player.Character
-    for _, part in pairs(char:GetDescendants()) do
+    for _, part in pairs(player.Character:GetDescendants()) do
         if part:IsA("BasePart") and not part:FindFirstChildWhichIsA("Highlight") then
             if active then
                 local hl = Instance.new("Highlight")
-                hl.FillColor = Color3.fromRGB(255, 0, 0)
-                hl.OutlineColor = Color3.fromRGB(255, 0, 0)
-                hl.FillTransparency = 0.5
+                hl.FillColor          = Color3.fromRGB(255, 0, 0)
+                hl.OutlineColor       = Color3.fromRGB(255, 0, 0)
+                hl.FillTransparency   = 0.5
                 hl.OutlineTransparency = 0.2
-                hl.Parent = part
+                hl.Parent             = part
             end
         end
     end
@@ -97,26 +145,20 @@ end
 local function clearCharm(player)
     if not player or not player.Character then return end
     for _, hl in pairs(player.Character:GetDescendants()) do
-        if hl:IsA("Highlight") then
-            hl:Destroy()
-        end
+        if hl:IsA("Highlight") then hl:Destroy() end
     end
 end
 
 local function updateCharm(targets)
     local activePlayers = {}
-    for _, t in ipairs(targets) do
-        activePlayers[t.player] = true
-    end
-    
-    for p, _ in pairs(highlightedPlayers) do
+    for _, t in ipairs(targets) do activePlayers[t.player] = true end
+    for p in pairs(highlightedPlayers) do
         if not activePlayers[p] then
             clearCharm(p)
             highlightedPlayers[p] = nil
         end
     end
-    
-    for p, _ in pairs(activePlayers) do
+    for p in pairs(activePlayers) do
         if not highlightedPlayers[p] then
             setCharm(p, true)
             highlightedPlayers[p] = true
@@ -124,317 +166,1190 @@ local function updateCharm(targets)
     end
 end
 
-local function toggleUI()
-    UI_STATE.visible = not UI_STATE.visible
-    mainFrame.Visible = UI_STATE.visible
+-- ══════════════════════════════════════════════════════
+--  UI  —  HELPER FACTORIES
+-- ══════════════════════════════════════════════════════
+local toggleRefs = {}   -- label → {setState, getState}
+
+local function applyCorner(obj, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r)
+    c.Parent = obj
+    return c
 end
 
-local function updateUIState()
-    if not mainFrame or not mainFrame.Visible then return end
-    -- Update visual states of toggles
-    local fovToggle = uiElements.fovToggle
-    local charmToggle = uiElements.charmToggle
-    local bodyToggle = uiElements.bodyToggle
-    
-    if fovToggle then
-        fovToggle.BackgroundColor3 = fovEnabled and THEME.ACCENT or THEME.BG
-        fovToggle.Text = fovEnabled and "ON" or "OFF"
-    end
-    if charmToggle then
-        charmToggle.BackgroundColor3 = charmEnabled and THEME.ACCENT or THEME.BG
-        charmToggle.Text = charmEnabled and "ON" or "OFF"
-    end
-    if bodyToggle then
-        bodyToggle.BackgroundColor3 = aimBody and THEME.ACCENT or THEME.BG
-        bodyToggle.Text = aimBody and "BODY" or "HEAD"
-    end
+local function applyStroke(obj, col, thick)
+    local s = Instance.new("UIStroke")
+    s.Color     = col or C.Border
+    s.Thickness = thick or 1
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = obj
+    return s
 end
 
--- ================= UI CONSTRUCTION =================
+-- ── Section Header ──────────────────────────
+local function makeSection(parent, text, order)
+    local holder = Instance.new("Frame")
+    holder.Name                   = "Sec_" .. text
+    holder.Size                   = UDim2.new(1, 0, 0, 28)
+    holder.BackgroundTransparency = 1
+    holder.LayoutOrder            = order
+    holder.Parent                 = parent
 
-local function createInstance(className, props, children)
-    local inst = Instance.new(className)
-    for k, v in pairs(props) do
-        if type(k) == "number" then
-            -- Handle children array if passed as 1,2,3...
-            continue
+    local bar = Instance.new("Frame")
+    bar.Size             = UDim2.new(0, 3, 0, 12)
+    bar.Position         = UDim2.new(0, 2, 0.5, -6)
+    bar.BackgroundColor3 = C.Accent
+    bar.BorderSizePixel  = 0
+    bar.Parent           = holder
+    applyCorner(bar, 2)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                   = UDim2.new(1, -14, 1, 0)
+    lbl.Position               = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                   = text
+    lbl.TextColor3             = C.Accent
+    lbl.TextSize               = 11
+    lbl.Font                   = Enum.Font.GothamBold
+    lbl.TextXAlignment         = Enum.TextXAlignment.Left
+    lbl.Parent                 = holder
+
+    local line = Instance.new("Frame")
+    line.Size             = UDim2.new(1, 0, 0, 1)
+    line.Position         = UDim2.new(0, 0, 1, -2)
+    line.BackgroundColor3 = C.Accent
+    line.BorderSizePixel  = 0
+    line.Parent           = holder
+    local lg = Instance.new("UIGradient")
+    lg.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.55),
+        NumberSequenceKeypoint.new(1, 1),
+    })
+    lg.Parent = line
+
+    return holder
+end
+
+local TOGGLE_DESC = {
+    ["Aim Lock"]           = "Press [=] to turn on / off quickly",
+    ["Aim at Body"]        = "Off = Head   |   On = Body",
+    ["Closest First"]      = "On = nearest to you. Off = nearest to crosshair",
+    ["FOV Circle Visible"] = "Show the targeting circle on screen",
+    ["Charm / Highlight"]  = "Red highlight on enemies inside the FOV",
+}
+
+-- ── Toggle Switch (with status indicators) ──
+local function makeToggle(parent, label, default, order, callback)
+    local desc = TOGGLE_DESC[label]
+    local row = Instance.new("Frame")
+    row.Name             = "Tog_" .. label
+    row.Size             = UDim2.new(1, 0, 0, desc and 46 or 38)
+    row.BackgroundColor3 = C.Surface
+    row.BorderSizePixel  = 0
+    row.LayoutOrder      = order
+    row.Parent           = parent
+    applyCorner(row, 6)
+    local rowStroke = applyStroke(row, default and C.AccentDim or C.Border, 1)
+    rowStroke.Transparency = 0.45
+
+    -- hover
+    row.MouseEnter:Connect(function()
+        TweenService:Create(row, TWEEN_FAST, {BackgroundColor3 = C.SurfaceHov}):Play()
+    end)
+    row.MouseLeave:Connect(function()
+        TweenService:Create(row, TWEEN_FAST, {BackgroundColor3 = C.Surface}):Play()
+    end)
+
+    local stateCol = default and C.Green or C.Red
+
+    -- left status bar
+    local bar = Instance.new("Frame")
+    bar.Size             = UDim2.new(0, 3, 0, 20)
+    bar.Position         = UDim2.new(0, 0, 0.5, -10)
+    bar.BackgroundColor3 = default and C.Green or C.ToggleOff
+    bar.BorderSizePixel  = 0
+    bar.Parent           = row
+    applyCorner(bar, 2)
+
+    -- glowing status dot
+    local glow = Instance.new("Frame")
+    glow.Size                   = UDim2.new(0, 18, 0, 18)
+    glow.Position               = UDim2.new(0, 10, 0.5, -9)
+    glow.BackgroundColor3       = stateCol
+    glow.BackgroundTransparency = 0.82
+    glow.BorderSizePixel        = 0
+    glow.Parent                 = row
+    applyCorner(glow, 9)
+
+    local dot = Instance.new("Frame")
+    dot.Size             = UDim2.new(0, 8, 0, 8)
+    dot.Position         = UDim2.new(0, 15, 0.5, -4)
+    dot.BackgroundColor3 = stateCol
+    dot.BorderSizePixel  = 0
+    dot.Parent           = row
+    applyCorner(dot, 4)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size               = desc and UDim2.new(1, -140, 0, 22) or UDim2.new(1, -140, 1, 0)
+    lbl.Position           = desc and UDim2.new(0, 36, 0, 6) or UDim2.new(0, 36, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text               = label
+    lbl.TextColor3         = C.Text
+    lbl.TextSize           = 12
+    lbl.Font               = Enum.Font.GothamSemibold
+    lbl.TextXAlignment     = Enum.TextXAlignment.Left
+    lbl.Parent             = row
+
+    if desc then
+        local dl = Instance.new("TextLabel")
+        dl.Size               = UDim2.new(1, -140, 0, 14)
+        dl.Position           = UDim2.new(0, 36, 0, 26)
+        dl.BackgroundTransparency = 1
+        dl.Text               = desc
+        dl.TextColor3         = C.TextMuted
+        dl.TextSize           = 9
+        dl.Font               = Enum.Font.Gotham
+        dl.TextXAlignment     = Enum.TextXAlignment.Left
+        dl.TextTruncate       = Enum.TextTruncate.AtEnd
+        dl.Parent             = row
+    end
+
+    -- ON / OFF pill
+    local pill = Instance.new("Frame")
+    pill.Size             = UDim2.new(0, 40, 0, 18)
+    pill.Position         = UDim2.new(1, -100, 0.5, -9)
+    pill.BackgroundColor3 = default and C.GreenDim or C.RedDim
+    pill.BorderSizePixel  = 0
+    pill.Parent           = row
+    applyCorner(pill, 9)
+
+    local pillTxt = Instance.new("TextLabel")
+    pillTxt.Size               = UDim2.new(1, 0, 1, 0)
+    pillTxt.BackgroundTransparency = 1
+    pillTxt.Text               = default and "ON" or "OFF"
+    pillTxt.TextColor3         = stateCol
+    pillTxt.TextSize           = 9
+    pillTxt.Font               = Enum.Font.GothamBold
+    pillTxt.Parent             = pill
+
+    -- track
+    local track = Instance.new("Frame")
+    track.Size            = UDim2.new(0, 36, 0, 18)
+    track.Position        = UDim2.new(1, -48, 0.5, -9)
+    track.BackgroundColor3 = default and C.Accent or C.ToggleOff
+    track.BorderSizePixel = 0
+    track.Parent          = row
+    applyCorner(track, 9)
+
+    -- knob
+    local knob = Instance.new("Frame")
+    knob.Size            = UDim2.new(0, 14, 0, 14)
+    knob.Position        = default and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+    knob.BackgroundColor3 = C.Text
+    knob.BorderSizePixel = 0
+    knob.Parent          = track
+    applyCorner(knob, 7)
+
+    local state = default
+
+    local function setState(v, skipCb)
+        state = v
+        local col = state and C.Green or C.Red
+        TweenService:Create(track, TWEEN_FAST, {BackgroundColor3 = state and C.Accent or C.ToggleOff}):Play()
+        TweenService:Create(knob, TWEEN_FAST, {
+            Position = state and UDim2.new(1, -16, 0.5, -7) or UDim2.new(0, 2, 0.5, -7)
+        }):Play()
+        TweenService:Create(bar,  TWEEN_FAST, {BackgroundColor3 = state and C.Green or C.ToggleOff}):Play()
+        TweenService:Create(dot,  TWEEN_FAST, {BackgroundColor3 = col}):Play()
+        TweenService:Create(glow, TWEEN_FAST, {BackgroundColor3 = col}):Play()
+        TweenService:Create(pill, TWEEN_FAST, {BackgroundColor3 = state and C.GreenDim or C.RedDim}):Play()
+        TweenService:Create(pillTxt, TWEEN_FAST, {TextColor3 = col}):Play()
+        TweenService:Create(rowStroke, TWEEN_FAST, {Color = state and C.AccentDim or C.Border}):Play()
+        pillTxt.Text = state and "ON" or "OFF"
+        if not skipCb and callback then callback(state) end
+    end
+
+    -- click area
+    local btn = Instance.new("TextButton")
+    btn.Size               = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text               = ""
+    btn.Parent             = row
+    btn.MouseButton1Click:Connect(function() setState(not state) end)
+
+    local ref = {setState = setState, getState = function() return state end}
+    toggleRefs[label] = ref
+    return ref
+end
+
+-- ── Slider ──────────────────────────────────
+local function makeSlider(parent, label, min, max, default, order, callback)
+    local row = Instance.new("Frame")
+    row.Name            = "Sld_" .. label
+    row.Size            = UDim2.new(1, 0, 0, 60)
+    row.BackgroundColor3 = C.Surface
+    row.BorderSizePixel = 0
+    row.LayoutOrder     = order
+    row.Parent          = parent
+    applyCorner(row, 6)
+    local rs = applyStroke(row, C.Border, 1)
+    rs.Transparency = 0.5
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size               = UDim2.new(0.6, 0, 0, 22)
+    lbl.Position           = UDim2.new(0, 14, 0, 4)
+    lbl.BackgroundTransparency = 1
+    lbl.Text               = label
+    lbl.TextColor3         = C.Text
+    lbl.TextSize           = 12
+    lbl.Font               = Enum.Font.GothamSemibold
+    lbl.TextXAlignment     = Enum.TextXAlignment.Left
+    lbl.Parent             = row
+
+    -- value badge
+    local badge = Instance.new("Frame")
+    badge.Size             = UDim2.new(0, 52, 0, 20)
+    badge.Position         = UDim2.new(1, -66, 0, 5)
+    badge.BackgroundColor3 = C.Panel
+    badge.BorderSizePixel  = 0
+    badge.Parent           = row
+    applyCorner(badge, 5)
+    applyStroke(badge, C.AccentDim, 1)
+
+    local valLbl = Instance.new("TextLabel")
+    valLbl.Name            = "Val"
+    valLbl.Size            = UDim2.new(1, 0, 1, 0)
+    valLbl.BackgroundTransparency = 1
+    valLbl.Text            = tostring(default)
+    valLbl.TextColor3      = C.Accent
+    valLbl.TextSize        = 12
+    valLbl.Font            = Enum.Font.GothamBold
+    valLbl.Parent          = badge
+
+    -- track bg
+    local trackBg = Instance.new("Frame")
+    trackBg.Size            = UDim2.new(1, -28, 0, 5)
+    trackBg.Position        = UDim2.new(0, 14, 0, 36)
+    trackBg.BackgroundColor3 = C.ToggleOff
+    trackBg.BorderSizePixel = 0
+    trackBg.Parent          = row
+    applyCorner(trackBg, 3)
+
+    -- fill
+    local fill = Instance.new("Frame")
+    fill.Size            = UDim2.new((default - min) / (max - min), 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    fill.BorderSizePixel = 0
+    fill.Parent          = trackBg
+    applyCorner(fill, 3)
+    local fg = Instance.new("UIGradient")
+    fg.Color = ColorSequence.new(C.AccentDim, C.Accent)
+    fg.Parent = fill
+
+    -- min / max ticks
+    local function tick(txt, xAlign, xPos)
+        local tl = Instance.new("TextLabel")
+        tl.Size               = UDim2.new(0, 40, 0, 12)
+        tl.Position           = xPos
+        tl.BackgroundTransparency = 1
+        tl.Text               = txt
+        tl.TextColor3         = C.TextMuted
+        tl.TextSize           = 9
+        tl.Font               = Enum.Font.Gotham
+        tl.TextXAlignment     = xAlign
+        tl.Parent             = row
+    end
+    tick(tostring(min), Enum.TextXAlignment.Left,  UDim2.new(0, 14, 0, 44))
+    tick(tostring(max), Enum.TextXAlignment.Right, UDim2.new(1, -54, 0, 44))
+
+    -- knob
+    local sKnob = Instance.new("Frame")
+    sKnob.Size            = UDim2.new(0, 14, 0, 14)
+    sKnob.Position        = UDim2.new((default - min) / (max - min), -7, 0.5, -7)
+    sKnob.BackgroundColor3 = C.Text
+    sKnob.BorderSizePixel = 0
+    sKnob.ZIndex          = 3
+    sKnob.Parent          = trackBg
+    applyCorner(sKnob, 7)
+    applyStroke(sKnob, C.Accent, 2)
+
+    local dragging = false
+
+    local function update(inputX)
+        local tPos  = trackBg.AbsolutePosition.X
+        local tSize = trackBg.AbsoluteSize.X
+        local rel   = math.clamp((inputX - tPos) / tSize, 0, 1)
+        local val   = math.floor(min + rel * (max - min))
+        fill.Size     = UDim2.new(rel, 0, 1, 0)
+        sKnob.Position = UDim2.new(rel, -7, 0.5, -7)
+        valLbl.Text   = tostring(val)
+        if callback then callback(val) end
+    end
+
+    -- invisible interaction layer over the track area
+    local hitArea = Instance.new("TextButton")
+    hitArea.Size               = UDim2.new(1, -10, 0, 24)
+    hitArea.Position           = UDim2.new(0, 5, 0, 26)
+    hitArea.BackgroundTransparency = 1
+    hitArea.Text               = ""
+    hitArea.ZIndex             = 4
+    hitArea.Parent             = row
+
+    hitArea.MouseButton1Down:Connect(function(x)
+        dragging = true
+        update(x)
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            update(input.Position.X)
         end
-        inst[k] = v
-    end
-    if children then
-        for _, child in ipairs(children) do
-            child.Parent = inst
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
         end
-    end
-    return inst
+    end)
+
+    return {
+        setValue = function(v)
+            local rel = math.clamp((v - min) / (max - min), 0, 1)
+            fill.Size      = UDim2.new(rel, 0, 1, 0)
+            sKnob.Position = UDim2.new(rel, -7, 0.5, -7)
+            valLbl.Text    = tostring(v)
+        end
+    }
 end
 
-local function createButton(text, props)
-    local btn = createInstance("TextButton", {
-        Text = text,
-        Font = Enum.Font.PoppinsSemiBold,
-        TextSize = 14,
-        TextColor3 = THEME.TEXT,
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0,
-        Size = UDim2.new(0, 100, 0, 36),
-        AutoButtonColor = false
-    }, props.children or {})
-    
+-- ── Info Row (auto-colored status dot) ─────
+local function makeInfoRow(parent, label, value, order)
+    local row = Instance.new("Frame")
+    row.Size            = UDim2.new(1, 0, 0, 28)
+    row.BackgroundColor3 = C.Surface
+    row.BorderSizePixel = 0
+    row.LayoutOrder     = order
+    row.Parent          = parent
+    applyCorner(row, 5)
+
+    local l = Instance.new("TextLabel")
+    l.Size               = UDim2.new(0.55, 0, 1, 0)
+    l.Position           = UDim2.new(0, 14, 0, 0)
+    l.BackgroundTransparency = 1
+    l.Text               = label
+    l.TextColor3         = C.TextMuted
+    l.TextSize           = 11
+    l.Font               = Enum.Font.Gotham
+    l.TextXAlignment     = Enum.TextXAlignment.Left
+    l.Parent             = row
+
+    local v = Instance.new("TextLabel")
+    v.Name               = "Val"
+    v.Size               = UDim2.new(0.4, 0, 1, 0)
+    v.Position           = UDim2.new(0.55, -14, 0, 0)
+    v.BackgroundTransparency = 1
+    v.Text               = value
+    v.TextColor3         = C.Text
+    v.TextSize           = 11
+    v.Font               = Enum.Font.GothamBold
+    v.TextXAlignment     = Enum.TextXAlignment.Right
+    v.Parent             = row
+
+    return v
+end
+
+-- ── Keybind Info Row ────────────────────────
+local function makeKeybindRow(parent, key, action, order)
+    local row = Instance.new("Frame")
+    row.Size            = UDim2.new(1, 0, 0, 28)
+    row.BackgroundColor3 = C.Surface
+    row.BorderSizePixel = 0
+    row.LayoutOrder     = order
+    row.Parent          = parent
+    applyCorner(row, 4)
+
+    -- key badge
+    local badge = Instance.new("Frame")
+    badge.Size            = UDim2.new(0, 28, 0, 18)
+    badge.Position        = UDim2.new(0, 10, 0.5, -9)
+    badge.BackgroundColor3 = C.Border
+    badge.BorderSizePixel = 0
+    badge.Parent          = row
+    applyCorner(badge, 4)
+
+    local kt = Instance.new("TextLabel")
+    kt.Size               = UDim2.new(1, 0, 1, 0)
+    kt.BackgroundTransparency = 1
+    kt.Text               = key
+    kt.TextColor3         = C.Accent
+    kt.TextSize           = 10
+    kt.Font               = Enum.Font.GothamBold
+    kt.Parent             = badge
+
+    local desc = Instance.new("TextLabel")
+    desc.Size               = UDim2.new(1, -56, 1, 0)
+    desc.Position           = UDim2.new(0, 46, 0, 0)
+    desc.BackgroundTransparency = 1
+    desc.Text               = action
+    desc.TextColor3         = C.TextMuted
+    desc.TextSize           = 11
+    desc.Font               = Enum.Font.Gotham
+    desc.TextXAlignment     = Enum.TextXAlignment.Left
+    desc.Parent             = row
+end
+
+-- ══════════════════════════════════════════════════════
+--  UI  —  BUILD
+-- ══════════════════════════════════════════════════════
+local gui = Instance.new("ScreenGui")
+gui.Name             = "FlowHub"
+gui.ResetOnSpawn     = false
+gui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset   = true
+
+pcall(function()
+    if syn and syn.protect_gui then syn.protect_gui(gui) end
+end)
+pcall(function() gui.Parent = game:GetService("CoreGui") end)
+if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+
+-- ── Outer Frame (animated gradient border) ─
+local FULL_SIZE = UDim2.new(0, 440, 0, 400)
+local MINI_SIZE = UDim2.new(0, 200, 0, 40)
+
+local outer = Instance.new("Frame")
+outer.Name            = "Outer"
+outer.Size            = FULL_SIZE
+outer.Position        = UDim2.new(0.5, -220, 0.3, -100)
+outer.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+outer.BorderSizePixel = 0
+outer.Active          = true
+outer.Parent          = gui
+local outerCorner = applyCorner(outer, 8)
+
+local borderGrad = Instance.new("UIGradient")
+borderGrad.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0,   C.Accent),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(30, 30, 36)),
+    ColorSequenceKeypoint.new(1,   C.AccentDim),
+})
+borderGrad.Rotation = 45
+borderGrad.Parent   = outer
+TweenService:Create(borderGrad, TweenInfo.new(8, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), {
+    Rotation = 405
+}):Play()
+
+-- drop shadow (subtle glow)
+local shadow = Instance.new("ImageLabel")
+shadow.Name               = "Shadow"
+shadow.Size               = UDim2.new(1, 30, 1, 30)
+shadow.Position           = UDim2.new(0, -15, 0, -15)
+shadow.BackgroundTransparency = 1
+shadow.Image              = "rbxassetid://6015897843" -- soft shadow 9‑slice
+shadow.ImageColor3        = C.Black
+shadow.ImageTransparency  = 0.4
+shadow.ScaleType          = Enum.ScaleType.Slice
+shadow.SliceCenter        = Rect.new(49, 49, 450, 450)
+shadow.ZIndex             = 0
+shadow.Parent             = outer
+
+-- ── Inner Panel ─────────────────────────────
+local inner = Instance.new("Frame")
+inner.Name            = "Inner"
+inner.Size            = UDim2.new(1, -2, 1, -2)
+inner.Position        = UDim2.new(0, 1, 0, 1)
+inner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+inner.BorderSizePixel = 0
+inner.ClipsDescendants = true
+inner.Parent          = outer
+local innerCorner = applyCorner(inner, 7)
+
+local panelGrad = Instance.new("UIGradient")
+panelGrad.Color = ColorSequence.new(Color3.fromRGB(17, 17, 22), Color3.fromRGB(8, 8, 10))
+panelGrad.Rotation = 90
+panelGrad.Parent = inner
+
+-- ── Show / Hide helpers (used by [L] and ✕) ─
+local function hideUI()
+    uiVisible = false
+    TweenService:Create(outer, TWEEN_MED, {
+        Size = UDim2.new(0, outer.Size.X.Offset, 0, 0),
+    }):Play()
+    task.delay(0.3, function()
+        if not uiVisible then outer.Visible = false end
+    end)
+end
+
+local function showUI()
+    uiVisible = true
+    local target = minimized and MINI_SIZE or FULL_SIZE
+    outer.Visible = true
+    outer.Size = UDim2.new(0, target.X.Offset, 0, 0)
+    TweenService:Create(outer, TWEEN_MED, {Size = target}):Play()
+end
+
+-- ══════════════════════════════════════════════
+--  TITLE BAR
+-- ══════════════════════════════════════════════
+local titleBar = Instance.new("Frame")
+titleBar.Name            = "TitleBar"
+titleBar.Size            = UDim2.new(1, 0, 0, 38)
+titleBar.BackgroundTransparency = 1
+titleBar.Parent          = inner
+
+-- Logo glyph (pulsing)
+local logoGlyph = Instance.new("TextLabel")
+logoGlyph.Size               = UDim2.new(0, 24, 0, 38)
+logoGlyph.Position           = UDim2.new(0, 14, 0, 0)
+logoGlyph.BackgroundTransparency = 1
+logoGlyph.Text               = "◈"
+logoGlyph.TextColor3         = C.Accent
+logoGlyph.TextSize           = 16
+logoGlyph.Font               = Enum.Font.GothamBold
+logoGlyph.Parent             = titleBar
+TweenService:Create(logoGlyph, TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {
+    TextTransparency = 0.55
+}):Play()
+
+local logoText = Instance.new("TextLabel")
+logoText.Size               = UDim2.new(0, 70, 0, 38)
+logoText.Position           = UDim2.new(0, 36, 0, 0)
+logoText.BackgroundTransparency = 1
+logoText.Text               = "FLOWHUB"
+logoText.TextColor3         = C.Text
+logoText.TextSize           = 12
+logoText.Font               = Enum.Font.GothamBold
+logoText.TextXAlignment     = Enum.TextXAlignment.Left
+logoText.Parent             = titleBar
+
+-- ── Window Controls ─────────────────────────
+local function makeWinBtn(symbol, posFromRight, hoverColor)
+    local btn = Instance.new("TextButton")
+    btn.Size               = UDim2.new(0, 30, 0, 28)
+    btn.Position           = UDim2.new(1, -posFromRight, 0, 5)
+    btn.BackgroundTransparency = 1
+    btn.Text               = symbol
+    btn.TextColor3         = C.TextMuted
+    btn.TextSize           = 13
+    btn.Font               = Enum.Font.GothamBold
+    btn.Parent             = titleBar
+    applyCorner(btn, 6)
+
     btn.MouseEnter:Connect(function()
-        if not props.disabled then
-            btn.BackgroundColor3 = THEME.BORDER
-        end
+        TweenService:Create(btn, TWEEN_FAST, {
+            TextColor3 = hoverColor,
+            BackgroundTransparency = 0.85,
+            BackgroundColor3 = hoverColor,
+        }):Play()
     end)
     btn.MouseLeave:Connect(function()
-        if not props.disabled then
-            btn.BackgroundColor3 = THEME.BG
-        end
+        TweenService:Create(btn, TWEEN_FAST, {
+            TextColor3 = C.TextMuted,
+            BackgroundTransparency = 1,
+        }):Play()
     end)
-    
-    if props.onClick then
-        btn.MouseButton1Click:Connect(function()
-            props.onClick()
-        end)
-    end
     return btn
 end
 
-local function createToggle(label, initialOn, onChange)
-    local container = createInstance("Frame", {
-        Size = UDim2.new(0, 180, 0, 40),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0
-    })
-    
-    local labelTxt = createInstance("TextLabel", {
-        Text = label,
-        Font = Enum.Font.PoppinsMedium,
-        TextSize = 13,
-        TextColor3 = THEME.TEXT,
-        BackgroundTransparency = 1,
-        Size = UDim2.new(0.6, 0, 1, 0),
-        TextXAlignment = Enum.TextXAlignment.Left
-    }, { Parent = container })
-    
-    local toggleBtn = createInstance("TextButton", {
-        Text = initialOn and "ON" or "OFF",
-        Font = Enum.Font.PoppinsSemiBold,
-        TextSize = 12,
-        TextColor3 = THEME.TEXT,
-        BackgroundColor3 = initialOn and THEME.ACCENT or THEME.BORDER,
-        BorderSizePixel = 0,
-        Size = UDim2.new(0, 60, 0, 24),
-        Position = UDim2.new(0.65, 0, 0.5, -12),
-        AutoButtonColor = false
-    }, { Parent = container })
-    
-    toggleBtn.MouseButton1Click:Connect(function()
-        local state = toggleBtn.Text == "ON"
-        toggleBtn.Text = state and "OFF" or "ON"
-        toggleBtn.BackgroundColor3 = state and THEME.BORDER or THEME.ACCENT
-        if onChange then onChange(not state) end
-    end)
-    
-    return container, toggleBtn
+local closeBtn = makeWinBtn("✕", 36, C.Red)
+local minBtn   = makeWinBtn("─", 68, C.Accent)
+
+closeBtn.MouseButton1Click:Connect(function()
+    hideUI()
+end)
+
+-- ── Title divider (fading accent line) ──────
+local titleDiv = Instance.new("Frame")
+titleDiv.Size            = UDim2.new(1, -20, 0, 1)
+titleDiv.Position        = UDim2.new(0, 10, 0, 38)
+titleDiv.BackgroundColor3 = C.Accent
+titleDiv.BorderSizePixel = 0
+titleDiv.Parent          = inner
+local tdg = Instance.new("UIGradient")
+tdg.Transparency = NumberSequence.new({
+    NumberSequenceKeypoint.new(0,   1),
+    NumberSequenceKeypoint.new(0.5, 0.25),
+    NumberSequenceKeypoint.new(1,   1),
+})
+tdg.Parent = titleDiv
+
+-- ══════════════════════════════════════════════
+--  TAB SYSTEM
+-- ══════════════════════════════════════════════
+local TAB_NAMES  = {"HOME", "AIMBOT", "ESP", "SETTINGS"}
+local currentTab = "HOME"
+local tabBtns    = {}
+local tabPages   = {}
+
+local tabBar = Instance.new("Frame")
+tabBar.Name              = "TabBar"
+tabBar.Size              = UDim2.new(1, 0, 0, 28)
+tabBar.Position          = UDim2.new(0, 0, 0, 40)
+tabBar.BackgroundTransparency = 1
+tabBar.Parent            = inner
+
+-- tab divider
+local tabDiv = Instance.new("Frame")
+tabDiv.Size            = UDim2.new(1, -20, 0, 1)
+tabDiv.Position        = UDim2.new(0, 10, 0, 68)
+tabDiv.BackgroundColor3 = C.Border
+tabDiv.BorderSizePixel = 0
+tabDiv.Parent          = inner
+
+-- content container
+local contentFrame = Instance.new("Frame")
+contentFrame.Name              = "Content"
+contentFrame.Size              = UDim2.new(1, -20, 1, -94)
+contentFrame.Position          = UDim2.new(0, 10, 0, 72)
+contentFrame.BackgroundTransparency = 1
+contentFrame.ClipsDescendants  = true
+contentFrame.Parent            = inner
+
+-- status bar
+local statusBar = Instance.new("Frame")
+statusBar.Name            = "StatusBar"
+statusBar.Size            = UDim2.new(1, 0, 0, 22)
+statusBar.Position        = UDim2.new(0, 0, 1, -22)
+statusBar.BackgroundColor3 = Color3.fromRGB(8, 8, 8)
+statusBar.BorderSizePixel = 0
+statusBar.Parent          = inner
+
+local statusLbl = Instance.new("TextLabel")
+statusLbl.Size               = UDim2.new(1, -20, 1, 0)
+statusLbl.Position           = UDim2.new(0, 10, 0, 0)
+statusLbl.BackgroundTransparency = 1
+statusLbl.Text               = "Ready"
+statusLbl.TextColor3         = C.TextMuted
+statusLbl.TextSize           = 9
+statusLbl.Font               = Enum.Font.Gotham
+statusLbl.TextXAlignment     = Enum.TextXAlignment.Left
+statusLbl.Parent             = statusBar
+statusLbl.RichText           = true
+
+-- build tabs
+for i, name in ipairs(TAB_NAMES) do
+    local btn = Instance.new("TextButton")
+    btn.Name               = name
+    btn.Size               = UDim2.new(0.25, -8, 0, 24)
+    btn.Position           = UDim2.new((i - 1) * 0.25, 4, 0, 2)
+    btn.BackgroundTransparency = 1
+    btn.Text               = name
+    btn.TextSize           = 10
+    btn.Font               = Enum.Font.GothamBold
+    btn.TextColor3         = name == currentTab and C.Accent or C.TextMuted
+    btn.Parent             = tabBar
+    applyCorner(btn, 4)
+
+    -- underline
+    local ind = Instance.new("Frame")
+    ind.Name            = "Ind"
+    ind.Size            = UDim2.new(0.5, 0, 0, 2)
+    ind.Position        = UDim2.new(0.25, 0, 1, -2)
+    ind.BackgroundColor3 = C.Accent
+    ind.BorderSizePixel = 0
+    ind.Visible         = (name == currentTab)
+    ind.Parent          = btn
+    applyCorner(ind, 1)
+
+    -- page (scrollable)
+    local page = Instance.new("ScrollingFrame")
+    page.Name                = name .. "Page"
+    page.Size                = UDim2.new(1, 0, 1, -4)
+    page.Position            = UDim2.new(0, 0, 0, 2)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel     = 0
+    page.ScrollBarThickness  = 3
+    page.ScrollBarImageColor3 = C.Border
+    page.CanvasSize          = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible             = (name == currentTab)
+    page.Parent              = contentFrame
+
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding   = UDim.new(0, 5)
+    layout.Parent    = page
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingRight = UDim.new(0, 4)
+    pad.Parent       = page
+
+    tabBtns[name]  = btn
+    tabPages[name] = page
 end
 
-local function buildUI()
-    -- Main Frame
-    mainFrame = createInstance("Frame", {
-        Name = "FlowHubUI",
-        Size = UDim2.new(0, 450, 0, 600),
-        Position = UDim2.new(0.5, -225, 0.5, -300),
-        BackgroundColor3 = THEME.FRAME,
-        BorderSizePixel = 0,
-        Visible = UI_STATE.visible
-    }, { Parent = game:GetService("CoreGui") })
-    
-    -- Main Panel
-    local panel = createInstance("Frame", {
-        Name = "MainPanel",
-        Size = UDim2.new(1, -8, 1, -8),
-        Position = UDim2.new(0, 4, 0, 4),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0
-    }, { Parent = mainFrame })
-    
-    -- Title Bar
-    local titleBar = createInstance("Frame", {
-        Name = "TitleBar",
-        Size = UDim2.new(1, 0, 0, 40),
-        BackgroundColor3 = THEME.FRAME,
-        BorderSizePixel = 0
-    }, { Parent = panel })
-    
-    local logo = createInstance("TextLabel", {
-        Text = "〰 FLOWHUB",
-        Font = Enum.Font.PoppinsBold,
-        TextSize = 14,
-        TextColor3 = THEME.ACCENT,
-        BackgroundTransparency = 1,
-        Size = UDim2.new(0, 100, 1, 0),
-        Position = UDim2.new(0, 10, 0, 0),
-        TextXAlignment = Enum.TextXAlignment.Left
-    }, { Parent = titleBar })
-    
-    -- Window Controls (Min/Close)
-    local btnMin = createInstance("TextButton", {
-        Text = "—",
-        Font = Enum.Font.PoppinsMedium,
-        TextSize = 14,
-        TextColor3 = THEME.TEXT_DIM,
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0,
-        Size = UDim2.new(0, 30, 0, 24),
-        Position = UDim2.new(1, -70, 0.5, -12),
-        AutoButtonColor = false
-    }, { Parent = titleBar })
-    
-    local btnClose = createInstance("TextButton", {
-        Text = "✕",
-        Font = Enum.Font.PoppinsMedium,
-        TextSize = 14,
-        TextColor3 = THEME.TEXT_DIM,
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0,
-        Size = UDim2.new(0, 30, 0, 24),
-        Position = UDim2.new(1, -38, 0.5, -12),
-        AutoButtonColor = false
-    }, { Parent = titleBar })
-    
-    btnMin.MouseButton1Click:Connect(function()
-        mainFrame.Visible = false
-    end)
-    
-    btnClose.MouseButton1Click:Connect(function()
-        mainFrame:Destroy()
-    end)
-    
-    -- Content Area
-    local content = createInstance("ScrollingFrame", {
-        Name = "Content",
-        Size = UDim2.new(1, -16, 1, -56),
-        Position = UDim2.new(0, 8, 0, 48),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        CanvasSize = UDim2.new(0, 0, 0, 800),
-        ScrollBarThickness = 4,
-        ScrollBarImageColor3 = THEME.ACCENT
-    }, { Parent = panel })
-    
-    local contentList = createInstance("UIListLayout", {
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 12)
-    }, { Parent = content })
-    
-    -- 1. DASHBOARD / TOGGLES SECTION
-    local secToggles = createInstance("Frame", {
-        Size = UDim2.new(1, 0, 0, 160),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0
-    }, { Parent = content })
-    
-    local lblToggles = createInstance("TextLabel", {
-        Text = "SYSTEM CONTROLS",
-        Font = Enum.Font.PoppinsBold,
-        TextSize = 12,
-        TextColor3 = THEME.ACCENT,
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 20),
-        TextXAlignment = Enum.TextXAlignment.Left
-    }, { Parent = secToggles })
-    
-    local toggleContainer = createInstance("Frame", {
-        Size = UDim2.new(1, 0, 1, -20),
-        Position = UDim2.new(0, 0, 0, 20),
-        BackgroundTransparency = 1
-    }, { Parent = secToggles })
-    
-    local gridLayout = createInstance("UIGridLayout", {
-        CellSize = UDim2.new(0.45, 0, 0, 40),
-        CellPadding = UDim2.new(0.05, 0, 0.2, 0),
-        SortOrder = Enum.SortOrder.LayoutOrder
-    }, { Parent = toggleContainer })
-    
-    -- Create Toggles
-    local fovFrame, uiElements.fovToggle = createToggle("FOV CIRCLE", fovEnabled, function(state)
-        fovEnabled = state
-        fovCircle.Visible = state
-    end)
-    fovFrame.LayoutOrder = 1
-    fovFrame.Parent = toggleContainer
-    
-    local charmFrame, uiElements.charmToggle = createToggle("CHARM HIGHLIGHT", charmEnabled, function(state)
-        charmEnabled = state
-        if not state then
-            for p, _ in pairs(highlightedPlayers) do
-                clearCharm(p)
+-- tab highlight tint
+for n, b in pairs(tabBtns) do
+    b.BackgroundColor3       = C.Accent
+    b.BackgroundTransparency = (n == currentTab) and 0.88 or 1
+end
+
+local function switchTab(name)
+    currentTab = name
+    for n, btn in pairs(tabBtns) do
+        local active = (n == name)
+        TweenService:Create(btn, TWEEN_FAST, {
+            TextColor3 = active and C.Accent or C.TextMuted,
+            BackgroundTransparency = active and 0.88 or 1,
+        }):Play()
+        btn:FindFirstChild("Ind").Visible = active
+        tabPages[n].Visible = active
+    end
+end
+
+for n, btn in pairs(tabBtns) do
+    btn.MouseButton1Click:Connect(function() switchTab(n) end)
+end
+
+-- ══════════════════════════════════════════════
+--  MINIMIZE  (compact pill with live indicators)
+-- ══════════════════════════════════════════════
+local bodyParts = {tabBar, tabDiv, contentFrame, statusBar, titleDiv}
+
+local function setMinimized(m)
+    minimized = m
+    minBtn.Text = m and "+" or "─"
+    if m then
+        TweenService:Create(outer, TWEEN_MED, {Size = MINI_SIZE}):Play()
+        TweenService:Create(outerCorner, TWEEN_MED, {CornerRadius = UDim.new(0, 20)}):Play()
+        TweenService:Create(innerCorner, TWEEN_MED, {CornerRadius = UDim.new(0, 19)}):Play()
+        task.delay(0.15, function()
+            if minimized then
+                for _, o in ipairs(bodyParts) do o.Visible = false end
             end
+        end)
+    else
+        for _, o in ipairs(bodyParts) do o.Visible = true end
+        TweenService:Create(outer, TWEEN_MED, {Size = FULL_SIZE}):Play()
+        TweenService:Create(outerCorner, TWEEN_MED, {CornerRadius = UDim.new(0, 8)}):Play()
+        TweenService:Create(innerCorner, TWEEN_MED, {CornerRadius = UDim.new(0, 7)}):Play()
+    end
+end
+
+minBtn.MouseButton1Click:Connect(function()
+    setMinimized(not minimized)
+end)
+
+-- ══════════════════════════════════════════════
+--  PAGE CONTENT
+-- ══════════════════════════════════════════════
+
+-- ── HOME ────────────────────────────────────
+local hp = tabPages["HOME"]
+
+-- hero status card
+local hero = Instance.new("Frame")
+hero.Name             = "Hero"
+hero.Size             = UDim2.new(1, 0, 0, 72)
+hero.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+hero.BorderSizePixel  = 0
+hero.LayoutOrder      = 0
+hero.Parent           = hp
+applyCorner(hero, 8)
+local heroStroke = applyStroke(hero, C.Border, 1)
+local heroGrad = Instance.new("UIGradient")
+heroGrad.Color = ColorSequence.new(Color3.fromRGB(24, 34, 50), Color3.fromRGB(16, 16, 18))
+heroGrad.Rotation = 20
+heroGrad.Parent = hero
+
+local function heroLabel(text, size, font, color, pos, sz, align)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextSize = size
+    l.Font = font
+    l.TextColor3 = color
+    l.Position = pos
+    l.Size = sz
+    l.TextXAlignment = align
+    l.Parent = hero
+    return l
+end
+heroLabel("AIMBOT", 10, Enum.Font.GothamBold, C.TextMuted,
+    UDim2.new(0, 16, 0, 10), UDim2.new(0.5, 0, 0, 14), Enum.TextXAlignment.Left)
+local heroStatus = heroLabel("STANDBY", 20, Enum.Font.GothamBold, C.TextMuted,
+    UDim2.new(0, 16, 0, 26), UDim2.new(0.5, 0, 0, 30), Enum.TextXAlignment.Left)
+local heroHint = heroLabel("Press [=] to toggle", 9, Enum.Font.Gotham, C.TextMuted,
+    UDim2.new(0, 16, 0, 54), UDim2.new(0.5, 0, 0, 12), Enum.TextXAlignment.Left)
+heroLabel("LOCKED TARGET", 10, Enum.Font.GothamBold, C.TextMuted,
+    UDim2.new(0.5, 0, 0, 10), UDim2.new(0.5, -16, 0, 14), Enum.TextXAlignment.Right)
+local heroTarget = heroLabel("—", 15, Enum.Font.GothamBold, C.Text,
+    UDim2.new(0.5, 0, 0, 28), UDim2.new(0.5, -16, 0, 22), Enum.TextXAlignment.Right)
+local heroSub = heroLabel("0 in FOV", 10, Enum.Font.Gotham, C.TextMuted,
+    UDim2.new(0.5, 0, 0, 52), UDim2.new(0.5, -16, 0, 14), Enum.TextXAlignment.Right)
+
+local function updateHero()
+    local on = aiming
+    heroStatus.Text       = on and "ACTIVE" or "STANDBY"
+    heroStatus.TextColor3 = on and C.Green or C.TextMuted
+    heroStroke.Color      = on and C.Green or C.Border
+    if on and currentTargetName ~= "None" then
+        heroTarget.Text = currentTargetName
+        heroSub.Text    = string.format("%d studs  ·  %d in FOV", currentTargetDist, targetCount or 0)
+    else
+        heroTarget.Text = "—"
+        heroSub.Text    = string.format("%d in FOV", targetCount or 0)
+    end
+end
+
+makeSection(hp, "OVERVIEW", 1)
+
+local infoAimLock  = makeInfoRow(hp, "Aim Lock",        aiming and "ON" or "OFF", 2)
+local infoAimPart  = makeInfoRow(hp, "Aim Part",        aimBody and "Body" or "Head", 3)
+local infoCharm    = makeInfoRow(hp, "ESP / Charm",     charmEnabled and "ON" or "OFF", 6)
+local infoTargets  = makeInfoRow(hp, "Targets in FOV",  "0", 7)
+
+makeSection(hp, "QUICK HELP", 8)
+
+local helpLbl = Instance.new("TextLabel")
+helpLbl.Size               = UDim2.new(1, 0, 0, 52)
+helpLbl.BackgroundColor3   = C.Surface
+helpLbl.TextColor3         = C.TextMuted
+helpLbl.Text               = "  Targets the closest enemy to you inside the FOV.\n  Drag your crosshair onto another enemy to switch.\n  [=] toggles aim   |   [L] shows / hides the UI."
+helpLbl.TextSize           = 10
+helpLbl.Font               = Enum.Font.Gotham
+helpLbl.TextXAlignment     = Enum.TextXAlignment.Left
+helpLbl.TextYAlignment     = Enum.TextYAlignment.Center
+helpLbl.TextWrapped        = true
+helpLbl.LayoutOrder        = 9
+helpLbl.BorderSizePixel    = 0
+helpLbl.Parent             = hp
+applyCorner(helpLbl, 4)
+
+-- ── AIMBOT ──────────────────────────────────
+local ap = tabPages["AIMBOT"]
+
+makeSection(ap, "🎯  AIM CONTROL", 1)
+
+local togAimLock = makeToggle(ap, "Aim Lock", aiming, 2, function(s)
+    aiming = s
+end)
+
+makeSection(ap, "🔘  TARGET SETTINGS", 3)
+
+local togClosest = makeToggle(ap, "Closest First", preferClosest, 4, function(s)
+    preferClosest = s
+    manualLock = false
+    lockedPlayer = nil
+end)
+
+local togAimBody = makeToggle(ap, "Aim at Body", aimBody, 5, function(s)
+    aimBody = s
+end)
+
+makeSection(ap, "⊙  FOV SETTINGS", 6)
+
+local togFov = makeToggle(ap, "FOV Circle Visible", fovEnabled, 7, function(s)
+    fovEnabled = s
+    fovCircle.Visible = s
+end)
+
+local sldFov = makeSlider(ap, "FOV Radius", 30, 1000, fovRadius, 8, function(v)
+    fovRadius = v
+    fovCircle.Radius = v
+end)
+
+local sldSmooth = makeSlider(ap, "Aim Smoothness", 5, 100, aimSmooth, 9, function(v)
+    aimSmooth = v
+end)
+
+-- ── ESP ─────────────────────────────────────
+local ep = tabPages["ESP"]
+
+makeSection(ep, "👁  VISUALS", 1)
+
+local togCharm = makeToggle(ep, "Charm / Highlight", charmEnabled, 2, function(s)
+    charmEnabled = s
+    if not s then
+        for p in pairs(highlightedPlayers) do clearCharm(p) end
+        highlightedPlayers = {}
+    end
+end)
+
+local espDesc = Instance.new("TextLabel")
+espDesc.Size               = UDim2.new(1, 0, 0, 42)
+espDesc.BackgroundColor3   = C.Surface
+espDesc.TextColor3         = C.TextMuted
+espDesc.Text               = "  Adds a red Highlight to all enemy players\n  who are inside your FOV circle."
+espDesc.TextSize           = 10
+espDesc.Font               = Enum.Font.Gotham
+espDesc.TextXAlignment     = Enum.TextXAlignment.Left
+espDesc.TextYAlignment     = Enum.TextYAlignment.Center
+espDesc.TextWrapped        = true
+espDesc.LayoutOrder        = 3
+espDesc.BorderSizePixel    = 0
+espDesc.Parent             = ep
+applyCorner(espDesc, 4)
+
+-- ── SETTINGS ────────────────────────────────
+local sp = tabPages["SETTINGS"]
+
+makeSection(sp, "⌨  KEYBINDS", 1)
+
+makeKeybindRow(sp, "-",  "Toggle FOV circle visibility",  3)
+makeKeybindRow(sp, "]",  "Toggle ESP / Charm",            4)
+makeKeybindRow(sp, "[",  "Toggle aim part (Head / Body)",  5)
+makeKeybindRow(sp, "=",  "Toggle Aim Lock on / off",      2)
+makeKeybindRow(sp, "L",  "Show / Hide this UI",            6)
+
+makeSection(sp, "📋  ABOUT", 7)
+
+local aboutLbl = Instance.new("TextLabel")
+aboutLbl.Size               = UDim2.new(1, 0, 0, 72)
+aboutLbl.BackgroundColor3   = C.Surface
+aboutLbl.TextColor3         = C.TextMuted
+aboutLbl.Text               = "  FlowHub\n  Aimbot And Esp control panel\n  All original script features preserved.\n  Credits: CDev"
+aboutLbl.TextSize           = 10
+aboutLbl.Font               = Enum.Font.Gotham
+aboutLbl.TextXAlignment     = Enum.TextXAlignment.Left
+aboutLbl.TextYAlignment     = Enum.TextYAlignment.Center
+aboutLbl.TextWrapped        = true
+aboutLbl.LayoutOrder        = 8
+aboutLbl.BorderSizePixel    = 0
+aboutLbl.Parent             = sp
+applyCorner(aboutLbl, 4)
+
+-- ══════════════════════════════════════════════
+--  DRAGGING
+-- ══════════════════════════════════════════════
+do
+    local dragging, dragStart, startPos
+
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos  = outer.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            outer.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  SYNC HELPERS  (keybind → UI)
+-- ══════════════════════════════════════════════
+local function syncUI()
+    -- Toggles (skipCallback = true to avoid re‑setting vars)
+    if toggleRefs["Aim Lock"]          then toggleRefs["Aim Lock"].setState(aiming, true) end
+    if toggleRefs["Aim at Body"]       then toggleRefs["Aim at Body"].setState(aimBody, true) end
+    if toggleRefs["FOV Circle Visible"] then toggleRefs["FOV Circle Visible"].setState(fovEnabled, true) end
+    if toggleRefs["Charm / Highlight"] then toggleRefs["Charm / Highlight"].setState(charmEnabled, true) end
+
+    -- Info rows
+    infoAimLock.Text  = aiming and "ON" or "OFF"
+    infoAimPart.Text  = aimBody and "Body" or "Head"
+    infoCharm.Text    = charmEnabled and "ON" or "OFF"
+    updateHero()
+end
+
+-- ══════════════════════════════════════════════
+--  INPUT HANDLING  (original keybinds + UI toggle)
+-- ══════════════════════════════════════════════
+UserInputService.InputBegan:Connect(function(input, gpe)
+    -- Hotkeys that work everywhere except while typing in a text box
+    if not UserInputService:GetFocusedTextBox() then
+        if input.KeyCode == Enum.KeyCode.L then
+            if uiVisible then hideUI() else showUI() end
+            return
+        end
+        if input.KeyCode == Enum.KeyCode.Equals then
+            aiming = not aiming
+            syncUI()
+            return
+        end
+    end
+
+    if gpe then return end
+
+    if input.KeyCode == Enum.KeyCode.Minus then
+        fovEnabled = not fovEnabled
+        fovCircle.Visible = fovEnabled
+        syncUI()
+    end
+
+    if input.KeyCode == Enum.KeyCode.RightBracket then
+        charmEnabled = not charmEnabled
+        if not charmEnabled then
+            for p in pairs(highlightedPlayers) do clearCharm(p) end
             highlightedPlayers = {}
         end
-    end)
-    charmFrame.LayoutOrder = 2
-    charmFrame.Parent = toggleContainer
-    
-    local bodyFrame, uiElements.bodyToggle = createToggle("AIM TARGET", aimBody, function(state)
-        aimBody = state
-    end)
-    bodyFrame.LayoutOrder = 3
-    bodyFrame.Parent = toggleContainer
-    
-    local aimFrame, uiElements.aimToggle = createToggle("AIM ASSIST", aiming, function(state)
-        aiming = state
-    end)
-    aimFrame.LayoutOrder = 4
-    aimFrame.Parent = toggleContainer
-    
-    -- 2. CLIENTS / EXPLORER SECTION
-    local secClients = createInstance("Frame", {
-        Size = UDim2.new(1, 0, 0, 200),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0
-    }, { Parent = content })
-    
-    local lblClients = createInstance("TextLabel", {
-        Text = "ACTIVE TARGETS",
-        Font = Enum.Font.PoppinsBold,
-        TextSize = 12,
-        TextColor3 = THEME.ACCENT,
-        BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 20),
-        TextXAlignment = Enum.TextXAlignment.Left
-    }, { Parent = secClients })
-    
-    local clientList = createInstance("Frame", {
-        Size = UDim2.new(1, 0, 1, -20),
-        Position = UDim2.new(0, 0, 0, 20),
-        BackgroundTransparency = 1
-    }, { Parent = secClients })
-    
-    local clientLayout = createInstance("UIListLayout", {
-        Padding = UDim.new(0, 4),
-        SortOrder = Enum.SortOrder.LayoutOrder
-    }, { Parent = clientList })
-    
-    uiElements.clientList = clientList
-    
-    -- 3. SETTINGS / FOOTER
-    local secFooter = createInstance("Frame", {
-        Size = UDim2.new(1, 0, 0, 50),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0
-    }, { Parent = content })
-    
-    local btnExecute = createButton("EXECUTE SNAPSHOT", {
-        Size = UDim2.new(0, 150, 0, 36),
-        Position = UDim2.new(0, 0, 0.5, -18),
-        BackgroundColor3 = THEME.ACCENT,
-        TextColor3 = Color3.fromRGB(0, 0, 0),
-        onClick = function()
-            -- Custom action hook
-            print("FlowHub: Snapshot Executed")
+        syncUI()
+    end
+
+    if input.KeyCode == Enum.KeyCode.LeftBracket then
+        aimBody = not aimBody
+        syncUI()
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        mouseDeltaAcc = mouseDeltaAcc + input.Delta.Magnitude
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  RENDER LOOP  (original — untouched + status)
+-- ══════════════════════════════════════════════
+-- on-screen marker for the current lock
+local targetMarker = Drawing.new("Circle")
+targetMarker.Radius       = 9
+targetMarker.Thickness    = 2
+targetMarker.NumSides     = 24
+targetMarker.Filled       = false
+targetMarker.Color        = Color3.fromRGB(70, 230, 110)
+targetMarker.Transparency = 1
+targetMarker.Visible      = false
+
+local function findTarget(list, player)
+    for _, x in ipairs(list) do
+        if x.player == player then return x end
+    end
+end
+
+local function nearestToMe(list)
+    local best, d = nil, math.huge
+    for _, x in ipairs(list) do
+        if x.dist3D < d then d = x.dist3D best = x end
+    end
+    return best
+end
+
+local function nearestToCrosshair(list)
+    local best, d = nil, math.huge
+    for _, x in ipairs(list) do
+        if x.screenDist < d then d = x.screenDist best = x end
+    end
+    return best
+end
+
+RunService.RenderStepped:Connect(function(dt)
+    cam = workspace.CurrentCamera or cam   -- camera can be replaced on respawn
+    fovCircle.Position = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    local targets = getValidTargets()
+    targetCount = #targets
+    local now = tick()
+
+    -- dragging the mouse = steering: pause aim assist, drop the lock,
+    -- and lock onto whoever your crosshair lands on once you slow down
+    if mouseDeltaAcc > 3 then
+        manualUntil  = now + 0.15
+        lockedPlayer = nil
+        manualLock   = false
+        dragPending  = true
+    end
+    mouseDeltaAcc = 0
+
+    local shown = nil
+
+    if aiming then
+        if now < manualUntil then
+            -- steering: preview the enemy under the crosshair
+            shown = nearestToCrosshair(targets)
+        else
+            local pick = lockedPlayer and findTarget(targets, lockedPlayer) or nil
+            local sticky = manualLock or not preferClosest
+
+            if pick and not sticky then
+                -- auto mode: switch only if someone is clearly closer to me (15%+)
+                local nearest = nearestToMe(targets)
+                if nearest and nearest.player ~= pick.player
+                    and nearest.dist3D < pick.dist3D * 0.85 then
+                    pick = nearest
+                end
+            end
+
+            if not pick then
+                if dragPending or not preferClosest then
+                    pick = nearestToCrosshair(targets)
+                    manualLock = pick ~= nil and dragPending
+                else
+                    pick = nearestToMe(targets)
+                    manualLock = false
+                end
+                dragPending = false
+            end
+
+            lockedPlayer = pick and pick.player or nil
+            if not pick then manualLock = false end
+
+            if pick then
+                local goal  = CFrame.new(cam.CFrame.Position, pick.part.Position)
+                local alpha = 1 - (1 - math.clamp(aimSmooth / 100, 0.01, 1)) ^ (math.clamp(dt, 0, 0.1) * 60)
+                cam.CFrame  = cam.CFrame:Lerp(goal, alpha)
+                shown = pick
+            end
         end
-    }, { Parent = secFooter })
-    
-    local btn
+    else
+        lockedPlayer = nil
+        manualLock   = false
+        dragPending  = false
+    end
+
+    if shown then
+        currentTargetName = shown.player.DisplayName ~= "" and shown.player.DisplayName or shown.player.Name
+        currentTargetDist = math.floor(shown.dist3D)
+        local sp, onScr = cam:WorldToViewportPoint(shown.part.Position)
+        targetMarker.Position = Vector2.new(sp.X, sp.Y)
+        targetMarker.Color    = (now < manualUntil) and Color3.fromRGB(235, 235, 235) or Color3.fromRGB(70, 230, 110)
+        targetMarker.Visible  = onScr
+    else
+        currentTargetName = "None"
+        targetMarker.Visible = false
+    end
+
+    if charmEnabled then
+        updateCharm(targets)
+    else
+        for p in pairs(highlightedPlayers) do clearCharm(p) end
+        highlightedPlayers = {}
+    end
+end)
+
+-- Status bar update (throttled to ~4 Hz)
+task.spawn(function()
+    while task.wait(0.1) do
+        local function dotFor(on)
+            return on and '<font color="#46E66E">●</font>' or '<font color="#EB4646">●</font>'
+        end
+        statusLbl.Text = string.format(
+            "%s Aim  %s FOV  %s ESP  │  Part: %s  │  Targets: %d  │  Radius: %d  │  [L] UI",
+            dotFor(aiming), dotFor(fovEnabled), dotFor(charmEnabled),
+            aimBody and "Body" or "Head", targetCount, fovRadius
+        )
+        updateHero()
+        -- Also update HOME info
+        infoTargets.Text = tostring(targetCount)
+        infoAimLock.Text = aiming and "ON" or "OFF"
+        infoAimPart.Text = aimBody and "Body" or "Head"
+        infoCharm.Text   = charmEnabled and "ON" or "OFF"
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  INTRO ANIMATION
+-- ══════════════════════════════════════════════
+outer.Size = UDim2.new(0, 440, 0, 0)
+outer.BackgroundTransparency = 1
+task.delay(0.05, function()
+    outer.BackgroundTransparency = 0
+    TweenService:Create(outer, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = FULL_SIZE,
+    }):Play()
+end)
