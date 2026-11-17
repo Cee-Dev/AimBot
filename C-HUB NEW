@@ -1,0 +1,368 @@
+--[[
+    C-HUB (version 1.0) — Optimized Aimbot, ESP & TriggerBot
+    [L] UI | [=] Aim | [-] FOV | [ ] ] Charms | [ [ ] Head/Body | [E] TriggerBot
+]]
+
+-- ══════════════════════════════════════════════
+--  SERVICES & CONSTANTS
+-- ══════════════════════════════════════════════
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+
+local plr = Players.LocalPlayer
+local Mouse = plr:GetMouse()
+local cam = workspace.CurrentCamera
+
+local C = {
+    Bg        = Color3.fromRGB(12, 12, 16),
+    Surface   = Color3.fromRGB(20, 20, 26),
+    Hover     = Color3.fromRGB(34, 34, 44),
+    Border    = Color3.fromRGB(38, 38, 48),
+    Accent    = Color3.fromRGB(68, 162, 249),
+    Text      = Color3.fromRGB(240, 240, 245),
+    Muted     = Color3.fromRGB(100, 100, 115),
+    Off       = Color3.fromRGB(46, 46, 56),
+    White     = Color3.fromRGB(255, 255, 255),
+    Black     = Color3.fromRGB(0, 0, 0),
+}
+
+local FAST   = TweenInfo.new(0.1,  Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
+local SMOOTH = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+local PALETTE = {
+    Color3.fromRGB(255, 255, 255), Color3.fromRGB(255, 55, 55),
+    Color3.fromRGB(255, 145, 45), Color3.fromRGB(255, 230, 55),
+    Color3.fromRGB(75, 230, 75), Color3.fromRGB(45, 220, 215),
+    Color3.fromRGB(68, 162, 249), Color3.fromRGB(140, 85, 255),
+    Color3.fromRGB(255, 85, 175), Color3.fromRGB(255, 45, 125),
+}
+
+-- Themed Object Registry
+local themed = {}
+local toggleRefs = {}
+local themeHooks = {}
+
+local function bind(obj, prop, key)
+    obj[prop] = C[key]
+    table.insert(themed, {obj, prop, key})
+    return obj
+end
+
+local function applyTheme()
+    for _, t in ipairs(themed) do
+        pcall(function() t[1][t[2]] = C[t[3]] end)
+    end
+    for _, ref in pairs(toggleRefs) do ref.recolor() end
+    for _, fn in ipairs(themeHooks) do pcall(fn) end
+end
+
+-- ══════════════════════════════════════════════
+--  LOADING UI
+-- ══════════════════════════════════════════════
+local loadingGui = Instance.new("ScreenGui")
+loadingGui.Name = "CHUB_Loader"
+loadingGui.ResetOnSpawn = false
+loadingGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+loadingGui.IgnoreGuiInset = true
+pcall(function()
+    if syn and syn.protect_gui then syn.protect_gui(loadingGui) end
+end)
+pcall(function() loadingGui.Parent = game:GetService("CoreGui") end)
+if not loadingGui.Parent then loadingGui.Parent = plr:WaitForChild("PlayerGui") end
+
+local loaderFrame = Instance.new("Frame")
+loaderFrame.Size = UDim2.new(1, 0, 1, 0)
+loaderFrame.BackgroundColor3 = C.Bg
+loaderFrame.BorderSizePixel = 0
+loaderFrame.Parent = loadingGui
+
+local loaderContent = Instance.new("Frame")
+loaderContent.Size = UDim2.fromOffset(300, 200)
+loaderContent.Position = UDim2.new(0.5, -150, 0.5, -100)
+loaderContent.BackgroundTransparency = 1
+loaderContent.Parent = loaderFrame
+
+-- Logo Placeholder (Simplified Wave)
+local logoFrame = Instance.new("Frame")
+logoFrame.Size = UDim2.fromOffset(48, 48)
+logoFrame.Position = UDim2.new(0.5, -24, 0, 0)
+logoFrame.BackgroundColor3 = C.Surface
+logoFrame.BorderSizePixel = 0
+logoFrame.Parent = loaderContent
+local logoCorner = Instance.new("UICorner")
+logoCorner.CornerRadius = UDim.new(0, 12)
+logoCorner.Parent = logoFrame
+local logoStroke = Instance.new("UIStroke")
+logoStroke.Color = C.Accent
+logoStroke.Thickness = 2
+logoStroke.Parent = logoFrame
+
+local logoIcon = Instance.new("TextLabel")
+logoIcon.Size = UDim2.new(1, 0, 1, 0)
+logoIcon.BackgroundTransparency = 1
+logoIcon.Text = "◉"
+logoIcon.TextColor3 = C.Accent
+logoIcon.TextSize = 32
+logoIcon.Font = Enum.Font.GothamBold
+logoIcon.Parent = logoFrame
+
+local loaderTitle = Instance.new("TextLabel")
+loaderTitle.Size = UDim2.new(1, 0, 0, 30)
+loaderTitle.Position = UDim2.new(0, 0, 1, 10)
+loaderTitle.BackgroundTransparency = 1
+loaderTitle.Text = "C-HUB"
+loaderTitle.TextColor3 = C.Text
+loaderTitle.TextSize = 24
+loaderTitle.Font = Enum.Font.GothamBold
+loaderTitle.TextXAlignment = Enum.TextXAlignment.Center
+loaderTitle.Parent = loaderContent
+
+local loaderSub = Instance.new("TextLabel")
+loaderSub.Size = UDim2.new(1, 0, 0, 20)
+loaderSub.Position = UDim2.new(0, 0, 1, 45)
+loaderSub.BackgroundTransparency = 1
+loaderSub.Text = "Initializing Modules..."
+loaderSub.TextColor3 = C.Muted
+loaderSub.TextSize = 12
+loaderSub.Font = Enum.Font.Gotham
+loaderSub.TextXAlignment = Enum.TextXAlignment.Center
+loaderSub.Parent = loaderContent
+
+-- Loading Bar
+local loaderBarBg = Instance.new("Frame")
+loaderBarBg.Size = UDim2.new(0, 200, 0, 4)
+loaderBarBg.Position = UDim2.new(0.5, -100, 1, 70)
+loaderBarBg.BackgroundColor3 = C.Surface
+loaderBarBg.BorderSizePixel = 0
+loaderBarBg.Parent = loaderContent
+local loaderBarCorner = Instance.new("UICorner")
+loaderBarCorner.CornerRadius = UDim.new(0, 2)
+loaderBarCorner.Parent = loaderBarBg
+
+local loaderBarFill = Instance.new("Frame")
+loaderBarFill.Size = UDim2.fromScale(0, 1)
+loaderBarFill.BackgroundColor3 = C.Accent
+loaderBarFill.BorderSizePixel = 0
+loaderBarFill.Parent = loaderBarBg
+
+-- Pulse Animation for Logo
+task.spawn(function()
+    while true do
+        TweenService:Create(logoStroke, SMOOTH, {Transparency = 0.5}):Play()
+        task.wait(0.5)
+        TweenService:Create(logoStroke, SMOOTH, {Transparency = 0}):Play()
+        task.wait(0.5)
+    end
+end)
+
+local function finishLoading()
+    TweenService:Create(loaderBarFill, SMOOTH, {Size = UDim2.fromScale(1, 1)}):Play()
+    task.wait(0.6)
+    TweenService:Create(loaderFrame, SMOOTH, {BackgroundTransparency = 1}):Play()
+    task.wait(0.25)
+    loadingGui:Destroy()
+end
+
+-- Simulate loading progress (Script execution is fast, but UI needs breath)
+task.spawn(function()
+    for i = 1, 10 do
+        TweenService:Create(loaderBarFill, FAST, {Size = UDim2.fromScale(i/10, 1)}):Play()
+        task.wait(0.05)
+    end
+    finishLoading()
+end)
+
+-- ══════════════════════════════════════════════
+--  STATE
+-- ══════════════════════════════════════════════
+local aiming            = false
+local triggerbotEnabled = false
+local fovEnabled        = false
+local charmEnabled      = false
+local aimBody           = false
+local fovRadius         = 150
+local aimSmooth         = 50
+
+local espDistance   = false
+local espHealth     = false
+local espSkeleton   = false
+local espNames      = false
+local detectNPCs    = false
+local aimNPCs       = false
+local espRange      = 1500
+
+local maxDistance   = 500
+local zoneEnabled   = false
+local zoneRadius    = 400
+local zoneCenter    = nil
+
+local HEAD_SCALE    = 0.7
+
+local fovColor        = Color3.fromRGB(255, 55, 55)
+local skelColor       = Color3.fromRGB(255, 255, 255)
+local charmsFillColor = Color3.fromRGB(255, 40, 40)
+local charmsOutColor  = Color3.fromRGB(255, 255, 255)
+local nameColor       = Color3.fromRGB(255, 255, 255)
+local distColor       = Color3.fromRGB(255, 255, 255)
+
+local targetCount   = 0
+local espCount      = 0
+local manualUntil   = 0
+local mouseDeltaAcc = 0
+local uiVisible     = true
+local minimized     = false
+
+-- ══════════════════════════════════════════════
+--  UTILITY: TEMP MESSAGE
+-- ══════════════════════════════════════════════
+local function showTempMessage(text, color)
+    task.spawn(function()
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "TempMessageUI"
+        screenGui.ResetOnSpawn = false
+        pcall(function()
+            if syn and syn.protect_gui then syn.protect_gui(screenGui) end
+        end)
+        pcall(function() screenGui.Parent = game:GetService("CoreGui") end)
+        if not screenGui.Parent then screenGui.Parent = plr:WaitForChild("PlayerGui") end
+
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(0, 220, 0, 42)
+        textLabel.Position = UDim2.new(0, 16, 1, -60)
+        textLabel.BackgroundTransparency = 0.2
+        textLabel.BackgroundColor3 = C.Bg
+        textLabel.Text = text
+        textLabel.TextColor3 = color or C.White
+        textLabel.Font = Enum.Font.GothamBold
+        textLabel.TextSize = 13
+        textLabel.TextStrokeTransparency = 0.7
+        textLabel.Parent = screenGui
+
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = textLabel
+
+        local s = Instance.new("UIStroke")
+        s.Color = color or C.Accent
+        s.Thickness = 1.2
+        s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        s.Parent = textLabel
+
+        task.wait(2.5)
+        local tw = TweenService:Create(textLabel, SMOOTH, {
+            BackgroundTransparency = 1,
+            TextTransparency = 1,
+            TextStrokeTransparency = 1,
+        })
+        tw:Play()
+        tw.Completed:Wait()
+        screenGui:Destroy()
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  ENTITY TRACKER (Optimized)
+-- ══════════════════════════════════════════════
+local entities = {}
+
+local function registerHumanoid(h)
+    if not h or not h:IsA("Humanoid") then return end
+    local model = h.Parent
+    if model and model:IsA("Model") then entities[model] = h end
+end
+
+-- Initial Scan (Deferred to avoid blocking main thread)
+task.spawn(function()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("Humanoid") then registerHumanoid(d) end
+    end
+end)
+
+workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("Humanoid") then task.defer(registerHumanoid, d) end
+end)
+
+workspace.DescendantRemoving:Connect(function(d)
+    if d:IsA("Humanoid") then
+        local m = d.Parent
+        if m and entities[m] == d then entities[m] = nil end
+    end
+end)
+
+-- Safe Rescan (Only if entities table is empty, likely due to teleport/reset)
+task.spawn(function()
+    while task.wait(15) do
+        if next(entities) == nil and plr.Character then
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if d:IsA("Humanoid") then registerHumanoid(d) end
+            end
+        end
+    end
+end)
+
+local function describe(model, hum, forAim)
+    if hum.Parent ~= model or model.Parent == nil then entities[model] = nil; return false end
+    if hum.Health <= 0 or model == plr.Character then return false end
+
+    local p = Players:GetPlayerFromCharacter(model)
+    if p then
+        if p == plr or isTeammate(p) then return false end
+    else
+        if forAim then
+            if not aimNPCs then return false end
+        elseif not detectNPCs then
+            return false
+        end
+    end
+
+    local root = model:FindFirstChild("HumanoidRootPart") or hum.RootPart or model.PrimaryPart
+    if not root or not root:IsA("BasePart") then return false end
+
+    local realHead = model:FindFirstChild("Head")
+    if realHead and not realHead:IsA("BasePart") then realHead = nil end
+    return p, root, realHead or root, p and p.DisplayName or model.Name, realHead ~= nil
+end
+
+local function isTeammate(p)
+    if p == plr then return true end
+    if plr.Team ~= nil and p.Team ~= nil then return plr.Team == p.Team end
+    if plr.Team ~= nil or p.Team ~= nil then return false end
+    local a, b = plr:GetAttribute("Team"), p:GetAttribute("Team")
+    if a ~= nil and a == b then return true end
+    return false
+end
+
+-- ══════════════════════════════════════════════
+--  AIM CORE
+-- ══════════════════════════════════════════════
+local function getTargetPart(character)
+    if aimBody then
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp end
+    end
+    local head = character:FindFirstChild("Head")
+    if head then return head end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getValidTargets()
+    local targets = {}
+    local myTeam  = plr.TeamColor
+    local myHead  = plr.Character and plr.Character:FindFirstChild("Head")
+    if not myHead then return targets end
+    local origin = myHead.Position
+    local center = Vector2.new(cam.ViewportSize.X / 2, cam.ViewportSize.Y / 2)
+
+    for _, v in pairs(Players:GetPlayers()) do
+        if v ~= plr and v.Character
+            and v.Character:FindFirstChild("Humanoid")
+            and v.Character.Humanoid.Health > 0 then
+            if v.TeamColor == myTeam then continue end
+            local targetPart = getTargetPart(v.Character)
+            if targetPart then
+                local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
+                if onScreen then
+                    local distFromCenter = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                    local dist3D = (target
