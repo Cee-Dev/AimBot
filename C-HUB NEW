@@ -73,6 +73,133 @@ local function applyTheme()
 end
 
 -- ══════════════════════════════════════════════
+--  LOADING SCREEN
+-- ══════════════════════════════════════════════
+local function createLoadingScreen(onComplete)
+    local loadingGui = Instance.new("ScreenGui")
+    loadingGui.Name = "CHUB_Loader"
+    loadingGui.ResetOnSpawn = false
+    pcall(function()
+        if syn and syn.protect_gui then syn.protect_gui(loadingGui) end
+        loadingGui.Parent = game:GetService("CoreGui")
+    end)
+    if not loadingGui.Parent then loadingGui.Parent = plr:WaitForChild("PlayerGui") end
+
+    -- Backdrop
+    local backdrop = Instance.new("Frame")
+    backdrop.Size = UDim2.new(1, 0, 1, 0)
+    backdrop.BackgroundColor3 = C.Bg
+    backdrop.BorderSizePixel = 0
+    backdrop.Parent = loadingGui
+
+    -- Logo
+    local logo = Instance.new("ImageLabel")
+    logo.Name = "Logo"
+    logo.Size = UDim2.fromOffset(64, 64)
+    logo.Position = UDim2.new(0.5, -32, 0.35, 0)
+    logo.BackgroundTransparency = 1
+    logo.Image = "rbxassetid://13357391531" -- Placeholder Roblox asset, replace with your b64 if needed
+    -- Note: Using standard asset for reliability in loader. If you want the specific b64 logo, 
+    -- you must decode it first or use a remote event. For now, a clean vector look is safer.
+    -- However, since you have the b64, let's use a Frame with the b64 if possible, 
+    -- but ImageLabel with b64 isn't native. We will use a stylized Frame instead for the loader 
+    -- to ensure it works instantly without file IO.
+    
+    -- Actually, let's use the B64 logic you already have, but we need to decode it first.
+    -- To keep the loader instant, we will use a clean UI representation.
+    
+    local logoFrame = Instance.new("Frame")
+    logoFrame.Size = UDim2.fromOffset(48, 48)
+    logoFrame.Position = UDim2.new(0.5, -24, 0.35, 0)
+    logoFrame.BackgroundColor3 = C.Accent
+    logoFrame.BorderSizePixel = 0
+    logoFrame.Parent = loadingGui
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = logoFrame
+    
+    local logoText = Instance.new("TextLabel")
+    logoText.Size = UDim2.new(1,0,1,0)
+    logoText.BackgroundTransparency = 1
+    logoText.Text = "C"
+    logoText.TextColor3 = C.White
+    logoText.Font = Enum.Font.GothamBlack
+    logoText.TextSize = 32
+    logoText.Parent = logoFrame
+    
+    -- Title
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(0, 200, 0, 30)
+    title.Position = UDim2.new(0.5, -100, 0.5, -20)
+    title.BackgroundTransparency = 1
+    title.Text = "C-HUB"
+    title.TextColor3 = C.Text
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 24
+    title.Parent = loadingGui
+    
+    -- Subtitle
+    local sub = Instance.new("TextLabel")
+    sub.Size = UDim2.new(0, 200, 0, 16)
+    sub.Position = UDim2.new(0.5, -100, 0.5, 10)
+    sub.BackgroundTransparency = 1
+    sub.Text = "Initializing Systems..."
+    sub.TextColor3 = C.Muted
+    sub.Font = Enum.Font.GothamMedium
+    sub.TextSize = 12
+    sub.Parent = loadingGui
+    
+    -- Progress Bar Container
+    local barContainer = Instance.new("Frame")
+    barContainer.Size = UDim2.new(0, 300, 0, 6)
+    barContainer.Position = UDim2.new(0.5, -150, 0.6, 0)
+    barContainer.BackgroundColor3 = C.Surface
+    barContainer.BorderSizePixel = 0
+    barContainer.Parent = loadingGui
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(0, 3)
+    barCorner.Parent = barContainer
+    
+    -- Progress Bar Fill
+    local barFill = Instance.new("Frame")
+    barFill.Size = UDim2.new(0, 0, 1, 0)
+    barFill.BackgroundColor3 = C.Accent
+    barFill.BorderSizePixel = 0
+    barFill.Parent = barContainer
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(0, 3)
+    fillCorner.Parent = barFill
+    
+    -- Status Text
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(0, 200, 0, 14)
+    statusLabel.Position = UDim2.new(0.5, -100, 0.68, 0)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "Scanning Workspace..."
+    statusLabel.TextColor3 = C.Muted
+    statusLabel.Font = Enum.Font.GothamMedium
+    statusLabel.TextSize = 10
+    statusLabel.Parent = loadingGui
+
+    -- API to update loader
+    local api = {}
+    
+    function api.setProgress(pct, message)
+        pct = math.clamp(pct, 0, 1)
+        TweenService:Create(barFill, SMOOTH, {Size = UDim2.new(pct, 0, 1, 0)}):Play()
+        if message then statusLabel.Text = message end
+    end
+
+    function api.destroy()
+        TweenService:Create(backdrop, FAST, {BackgroundTransparency = 1}):Play()
+        task.wait(0.1)
+        loadingGui:Destroy()
+    end
+
+    return api
+end
+
+-- ══════════════════════════════════════════════
 --  STATE
 -- ══════════════════════════════════════════════
 local aiming            = false
