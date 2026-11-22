@@ -72,6 +72,441 @@ local function applyTheme()
     for _, fn in ipairs(themeHooks) do pcall(fn) end
 end
 
+--!strict
+-- Improved C-HUB Loading Screen
+-- Upgrades: entrance/exit animations, shimmer, spinner, percentage, completion state,
+-- responsive layout, glow/stroke, robust cleanup, onComplete callback, pcall safety.
+
+local function createLoadingScreen(onComplete: (() -> ())?)
+    -- Guard against duplicate loaders
+    local existing = (function()
+        local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+        if ok and cg then
+            local found = cg:FindFirstChild("CHUB_Loader")
+            if found then return found end
+        end
+        return nil
+    end)()
+    if existing then existing:Destroy() end
+
+    -- Services (pcall-safe)
+    local TweenService = game:GetService("TweenService")
+    local RunService = game:GetService("RunService")
+    local Players = game:GetService("Players")
+    local plr = Players.LocalPlayer
+
+    -- Tween presets (defined locally so we don't depend on globals)
+    local FAST = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local SMOOTH = TweenInfo.new(0.4, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+    local BOUNCE = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    local FADE = TweenInfo.new(0.35, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+
+    -- Theme (fallback if C is missing)
+    local C = (getgenv and getgenv().C) or (rawget(_G, "C")) or {}
+    C.Bg = C.Bg or Color3.fromRGB(12, 12, 16)
+    C.Surface = C.Surface or Color3.fromRGB(24, 24, 32)
+    C.Accent = C.Accent or Color3.fromRGB(99, 102, 241)
+    C.Accent2 = C.Accent2 or Color3.fromRGB(139, 92, 246)
+    C.Text = C.Text or Color3.fromRGB(240, 240, 245)
+    C.Muted = C.Muted or Color3.fromRGB(140, 140, 160)
+    C.White = C.White or Color3.fromRGB(255, 255, 255)
+    C.Glow = C.Glow or Color3.fromRGB(99, 102, 241)
+
+    -- Root ScreenGui
+    local loadingGui = Instance.new("ScreenGui")
+    loadingGui.Name = "CHUB_Loader"
+    loadingGui.ResetOnSpawn = false
+    loadingGui.IgnoreGuiInset = true
+    loadingGui.DisplayOrder = 999999
+    loadingGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+    local parented = false
+    pcall(function()
+        if syn and syn.protect_gui then syn.protect_gui(loadingGui) end
+        loadingGui.Parent = game:GetService("CoreGui")
+        parented = true
+    end)
+    if not parented or not loadingGui.Parent then
+        pcall(function()
+            loadingGui.Parent = plr:WaitForChild("PlayerGui", 5)
+            parented = loadingGui.Parent ~= nil
+        end)
+    end
+    if not loadingGui.Parent then
+        -- Last resort: try CoreGui without protect
+        pcall(function() loadingGui.Parent = game:GetService("CoreGui") end)
+    end
+    if not loadingGui.Parent then
+        warn("[CHUB_Loader] Could not parent loading GUI")
+        if onComplete then pcall(onComplete) end
+        return { setProgress = function() end, setStatus = function() end, destroy = function() end }
+    end
+
+    -- State
+    local destroyed = false
+    local connections = {}
+    local tweens = {}
+    local function trackTween(t) table.insert(tweens, t) return t end
+    local function trackConn(c) table.insert(connections, c) return c end
+
+    -- Helpers
+    local function new(cls, props, parent)
+        local o = Instance.new(cls)
+        if props then
+            for k, v in pairs(props) do
+                if k ~= "Parent" then o[k] = v end
+            end
+        end
+        if parent then o.Parent = parent end
+        if props and props.Parent then o.Parent = props.Parent end
+        return o
+    end
+
+    local function addCorner(parent, radius)
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, radius or 8)
+        c.Parent = parent
+        return c
+    end
+
+    local function addStroke(parent, color, thickness, transparency)
+        local s = Instance.new("UIStroke")
+        s.Color = color or C.Accent
+        s.Thickness = thickness or 1
+        s.Transparency = transparency or 0
+        s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        s.Parent = parent
+        return s
+    end
+
+    local function addGradient(parent, c1, c2, rotation)
+        local g = Instance.new("UIGradient")
+        g.Color = ColorSequence.new(c1 or C.Accent, c2 or C.Accent2)
+        g.Rotation = rotation or 0
+        g.Parent = parent
+        return g
+    end
+
+    -- Backdrop
+    local backdrop = new("Frame", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = C.Bg,
+        BorderSizePixel = 0,
+        BackgroundTransparency = 1, -- start invisible for fade-in
+    }, loadingGui)
+
+    -- Subtle animated gradient backdrop
+    local bgGradient = addGradient(backdrop, C.Bg, Color3.fromRGB(8, 8, 14), 45)
+    local bgGradientTween
+    do
+        bgGradientTween = TweenService:Create(bgGradient, TweenInfo.new(6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {Rotation = 135})
+        trackTween(bgGradientTween)
+        bgGradientTween:Play()
+    end
+
+    -- Content container (everything else parents here, so backdrop fade is independent)
+    local content = new("Frame", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+    }, loadingGui)
+
+    -- Logo block
+    local logoSize = 72
+    local logoFrame = new("Frame", {
+        Size = UDim2.fromOffset(logoSize * 0.6, logoSize * 0.6),
+        Position = UDim2.new(0.5, 0, 0.32, 0),
+        BackgroundColor3 = C.Accent,
+        BorderSizePixel = 0,
+        BackgroundTransparency = 1, -- fade-in
+        AnchorPoint = Vector2.new(0.5, 0.5),
+    }, content)
+    addCorner(logoFrame, 18)
+    local logoGrad = addGradient(logoFrame, C.Accent, C.Accent2, 135)
+
+    -- Glow behind logo
+    local logoGlow = new("ImageLabel", {
+        Size = UDim2.fromOffset(logoSize * 2.2, logoSize * 2.2),
+        Position = UDim2.new(0.5, 0, 0.5, 0),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+        Image = "rbxassetid://5028857084", -- soft glow
+        ImageColor3 = C.Glow,
+        ImageTransparency = 0.6,
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 0,
+    }, logoFrame)
+
+    local logoText = new("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = "C",
+        TextColor3 = C.White,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 40,
+        TextTransparency = 1,
+    }, logoFrame)
+
+    -- Spinner ring around logo
+    local spinner = new("Frame", {
+        Size = UDim2.fromOffset(logoSize + 14, logoSize + 14),
+        Position = UDim2.new(0.5, 0, 0.32, 0),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        AnchorPoint = Vector2.new(0.5, 0.5),
+    }, content)
+    local spinnerStroke = Instance.new("UIStroke")
+    spinnerStroke.Color = C.Accent
+    spinnerStroke.Thickness = 2
+    spinnerStroke.Transparency = 0.4
+    spinnerStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    spinnerStroke.Parent = spinner
+    addCorner(spinner, 100)
+    -- Make spinner an arc via gradient transparency
+    local spinnerGrad = Instance.new("UIGradient")
+    spinnerGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(0.3, 0.2),
+        NumberSequenceKeypoint.new(1, 1),
+    })
+    spinnerGrad.Parent = spinnerStroke
+
+    -- Rotation animation for spinner
+    local spinConn
+    do
+        local angle = 0
+        spinConn = trackConn(RunService.RenderStepped:Connect(function(dt)
+            if destroyed then return end
+            angle = (angle + dt * 220) % 360
+            spinner.Rotation = angle
+        end))
+    end
+
+    -- Pulse animation for logo glow
+    local glowTween = trackTween(TweenService:Create(logoGlow, TweenInfo.new(1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {ImageTransparency = 0.85, Size = UDim2.fromOffset(logoSize * 2.6, logoSize * 2.6)}))
+    glowTween:Play()
+
+    -- Title
+    local title = new("TextLabel", {
+        Size = UDim2.new(0, 240, 0, 34),
+        Position = UDim2.new(0.5, -120, 0.46, 0),
+        BackgroundTransparency = 1,
+        Text = "C-HUB",
+        TextColor3 = C.Text,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 28,
+        TextTransparency = 1,
+    }, content)
+
+    -- Subtitle
+    local sub = new("TextLabel", {
+        Size = UDim2.new(0, 260, 0, 18),
+        Position = UDim2.new(0.5, -130, 0.52, 0),
+        BackgroundTransparency = 1,
+        Text = "Initializing Systems...",
+        TextColor3 = C.Muted,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        TextTransparency = 1,
+    }, content)
+
+    -- Progress Bar Container
+    local barWidth = 320
+    local barContainer = new("Frame", {
+        Size = UDim2.fromOffset(barWidth, 8),
+        Position = UDim2.new(0.5, -barWidth / 2, 0.62, 0),
+        BackgroundColor3 = C.Surface,
+        BorderSizePixel = 0,
+        BackgroundTransparency = 1,
+    }, content)
+    addCorner(barContainer, 4)
+    addStroke(barContainer, C.Surface, 1, 0.6)
+
+    -- Progress Bar Fill
+    local barFill = new("Frame", {
+        Size = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = C.Accent,
+        BorderSizePixel = 0,
+    }, barContainer)
+    addCorner(barFill, 4)
+    local fillGrad = addGradient(barFill, C.Accent, C.Accent2, 0)
+
+    -- Shimmer on fill
+    local shimmer = new("Frame", {
+        Size = UDim2.new(0, 40, 1, 0),
+        Position = UDim2.new(-0.2, 0, 0, 0),
+        BackgroundColor3 = C.White,
+        BackgroundTransparency = 0.75,
+        BorderSizePixel = 0,
+    }, barFill)
+    addCorner(shimmer, 4)
+    local shimmerTween = trackTween(TweenService:Create(shimmer, TweenInfo.new(1.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Position = UDim2.new(1.2, 0, 0, 0)}))
+    shimmerTween:Play()
+
+    -- Percentage text
+    local pctLabel = new("TextLabel", {
+        Size = UDim2.new(0, 60, 0, 16),
+        Position = UDim2.new(0.5, -30, 0.62, 14),
+        BackgroundTransparency = 1,
+        Text = "0%",
+        TextColor3 = C.Muted,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        TextTransparency = 1,
+    }, content)
+
+    -- Status text
+    local statusLabel = new("TextLabel", {
+        Size = UDim2.new(0, barWidth, 0, 16),
+        Position = UDim2.new(0.5, -barWidth / 2, 0.68, 0),
+        BackgroundTransparency = 1,
+        Text = "Scanning Workspace...",
+        TextColor3 = C.Muted,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 11,
+        TextTransparency = 1,
+        TextXAlignment = Enum.TextXAlignment.Center,
+    }, content)
+
+    -- Footer hint
+    local footer = new("TextLabel", {
+        Size = UDim2.new(0, 260, 0, 14),
+        Position = UDim2.new(0.5, -130, 0.92, 0),
+        BackgroundTransparency = 1,
+        Text = "C-HUB  •  Loading",
+        TextColor3 = C.Muted,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 10,
+        TextTransparency = 1,
+    }, content)
+
+    -- Completion overlay (hidden until done)
+    local checkFrame = new("Frame", {
+        Size = UDim2.fromOffset(44, 44),
+        Position = UDim2.new(0.5, -22, 0.32, -22),
+        BackgroundColor3 = Color3.fromRGB(34, 197, 94),
+        BorderSizePixel = 0,
+        BackgroundTransparency = 1,
+        Visible = false,
+    }, content)
+    addCorner(checkFrame, 22)
+    local checkText = new("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = "✓",
+        TextColor3 = C.White,
+        Font = Enum.Font.GothamBlack,
+        TextSize = 26,
+        TextTransparency = 1,
+    }, checkFrame)
+
+    -- Entrance animation
+    local function playEntrance()
+        TweenService:Create(backdrop, FADE, {BackgroundTransparency = 0}):Play()
+        task.delay(0.05, function()
+            if destroyed then return end
+            local t1 = TweenService:Create(logoFrame, BOUNCE, {BackgroundTransparency = 0, Size = UDim2.fromOffset(logoSize, logoSize)})
+            local t2 = TweenService:Create(logoText, FADE, {TextTransparency = 0})
+            local t3 = TweenService:Create(title, FADE, {TextTransparency = 0})
+            local t4 = TweenService:Create(sub, FADE, {TextTransparency = 0})
+            local t5 = TweenService:Create(barContainer, FADE, {BackgroundTransparency = 0})
+            local t6 = TweenService:Create(pctLabel, FADE, {TextTransparency = 0})
+            local t7 = TweenService:Create(statusLabel, FADE, {TextTransparency = 0})
+            local t8 = TweenService:Create(footer, FADE, {TextTransparency = 0})
+            for _, t in ipairs({t1, t2, t3, t4, t5, t6, t7, t8}) do t:Play() end
+        end)
+    end
+    playEntrance()
+
+    -- Internal state
+    local currentPct = 0
+    local completed = false
+
+    local api = {}
+
+    function api.setProgress(pct, message)
+        if destroyed then return end
+        pct = math.clamp(tonumber(pct) or 0, 0, 1)
+        currentPct = pct
+        TweenService:Create(barFill, SMOOTH, {Size = UDim2.new(pct, 0, 1, 0)}):Play()
+        pctLabel.Text = math.floor(pct * 100 + 0.5) .. "%"
+        if message then statusLabel.Text = tostring(message) end
+
+        -- Completion handling
+        if pct >= 1 and not completed then
+            completed = true
+            statusLabel.Text = message or "Complete"
+            -- Hide spinner, show check
+            spinner.Visible = false
+            checkFrame.Visible = true
+            checkFrame.BackgroundTransparency = 1
+            checkText.TextTransparency = 1
+            TweenService:Create(checkFrame, BOUNCE, {BackgroundTransparency = 0}):Play()
+            TweenService:Create(checkText, FADE, {TextTransparency = 0}):Play()
+            TweenService:Create(logoFrame, SMOOTH, {BackgroundColor3 = Color3.fromRGB(34, 197, 94)}):Play()
+            -- Shimmer stop
+            pcall(function() shimmerTween:Cancel() end)
+        end
+    end
+
+    function api.setStatus(message)
+        if destroyed then return end
+        if message then statusLabel.Text = tostring(message) end
+    end
+
+    function api.destroy()
+        if destroyed then return end
+        destroyed = true
+        -- Cancel loops
+        if spinConn then pcall(function() spinConn:Disconnect() end) end
+        if bgGradientTween then pcall(function() bgGradientTween:Cancel() end) end
+        if glowTween then pcall(function() glowTween:Cancel() end) end
+        if shimmerTween then pcall(function() shimmerTween:Cancel() end) end
+        for _, t in ipairs(tweens) do pcall(function() t:Cancel() end) end
+
+        -- Fade out everything
+        local fadeTargets = {backdrop, logoFrame, logoText, title, sub, barContainer, pctLabel, statusLabel, footer, checkFrame, checkText}
+        for _, obj in ipairs(fadeTargets) do
+            if obj and obj.Parent then
+                local props = {}
+                if obj:IsA("Frame") or obj:IsA("ImageLabel") then
+                    props.BackgroundTransparency = 1
+                end
+                if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+                    props.TextTransparency = 1
+                end
+                if obj:IsA("ImageLabel") then
+                    props.ImageTransparency = 1
+                end
+                pcall(function() TweenService:Create(obj, FADE, props):Play() end)
+            end
+        end
+        task.wait(0.38)
+        pcall(function() loadingGui:Destroy() end)
+        if onComplete then pcall(onComplete) end
+    end
+
+    -- Expose for external cleanup safety
+    loadingGui.Destroying:Connect(function()
+        destroyed = true
+    end)
+
+    return api
+end
+
+-- Example usage (remove in production):
+-- local loader = createLoadingScreen(function() print("Loaded!") end)
+-- task.spawn(function()
+--     for i = 0, 100 do
+--         loader.setProgress(i / 100, "Loading module " .. i)
+--         task.wait(0.03)
+--     end
+--     task.wait(0.6)
+--     loader.destroy()
+-- end)
+
+return createLoadingScreen
+
 -- ══════════════════════════════════════════════
 --  STATE
 -- ══════════════════════════════════════════════
