@@ -40,440 +40,7 @@ local SMOOTH = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.
 local BOUNCE = TweenInfo.new(0.35, Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
 local GENTLE = TweenInfo.new(0.8,  Enum.EasingStyle.Sine,  Enum.EasingDirection.InOut)
 
-local function createLoadingScreen(onComplete)
-    -- Guard against duplicate loaders
-    local existing = (function()
-        local ok, cg = pcall(function() return game:GetService("CoreGui") end)
-        if ok and cg then
-            local found = cg:FindFirstChild("CHUB_Loader")
-            if found then return found end
-        end
-        return nil
-    end)()
-    if existing then existing:Destroy() end
 
-
-    -- Tween presets (defined locally so we don't depend on globals)
-    local FAST = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-    local SMOOTH = TweenInfo.new(0.4, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-    local BOUNCE = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
-    local FADE = TweenInfo.new(0.35, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-
-    -- Theme: reuse C-HUB palette, fill missing keys with defaults
-    C.Accent2 = C.Accent2 or C.Accent
-    C.Glow    = C.Glow    or C.Accent
-    C.Hover   = C.Hover   or C.Surface
-    C.Border  = C.Border  or C.Surface
-    C.Off     = C.Off     or C.Surface
-    C.Black   = C.Black   or Color3.fromRGB(0, 0, 0)
-    C.White   = C.White   or Color3.fromRGB(255, 255, 255)
-
-    -- Root ScreenGui
-    local loadingGui = Instance.new("ScreenGui")
-    loadingGui.Name = "CHUB_Loader"
-    loadingGui.ResetOnSpawn = false
-    loadingGui.IgnoreGuiInset = true
-    loadingGui.DisplayOrder = 999999
-    loadingGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-
-    local parented = false
-    pcall(function()
-        if syn and syn.protect_gui then syn.protect_gui(loadingGui) end
-        loadingGui.Parent = game:GetService("CoreGui")
-        parented = true
-    end)
-    if not parented or not loadingGui.Parent then
-        pcall(function()
-            loadingGui.Parent = plr:WaitForChild("PlayerGui", 5)
-            parented = loadingGui.Parent ~= nil
-        end)
-    end
-    if not loadingGui.Parent then
-        -- Last resort: try CoreGui without protect
-        pcall(function() loadingGui.Parent = game:GetService("CoreGui") end)
-    end
-    if not loadingGui.Parent then
-        warn("[CHUB_Loader] Could not parent loading GUI")
-        if onComplete then pcall(onComplete) end
-        return { setProgress = function() end, setStatus = function() end, destroy = function() end }
-    end
-
-    -- State
-    local destroyed = false
-    local connections = {}
-    local tweens = {}
-    local function trackTween(t) table.insert(tweens, t) return t end
-    local function trackConn(c) table.insert(connections, c) return c end
-
-    -- Helpers
-    local function new(cls, props, parent)
-        local o = Instance.new(cls)
-        if props then
-            for k, v in pairs(props) do
-                if k ~= "Parent" then o[k] = v end
-            end
-        end
-        if parent then o.Parent = parent end
-        if props and props.Parent then o.Parent = props.Parent end
-        return o
-    end
-
-    local function addCorner(parent, radius)
-        local c = Instance.new("UICorner")
-        c.CornerRadius = UDim.new(0, radius or 8)
-        c.Parent = parent
-        return c
-    end
-
-    local function addStroke(parent, color, thickness, transparency)
-        local s = Instance.new("UIStroke")
-        s.Color = color or C.Accent
-        s.Thickness = thickness or 1
-        s.Transparency = transparency or 0
-        s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-        s.Parent = parent
-        return s
-    end
-
-    local function addGradient(parent, c1, c2, rotation)
-        local g = Instance.new("UIGradient")
-        g.Color = ColorSequence.new(c1 or C.Accent, c2 or C.Accent2)
-        g.Rotation = rotation or 0
-        g.Parent = parent
-        return g
-    end
-
-    -- Backdrop
-    local backdrop = new("Frame", {
-        Size = UDim2.new(1, 0, 1, 0),
-        BackgroundColor3 = C.Bg,
-        BorderSizePixel = 0,
-        BackgroundTransparency = 1, -- start invisible for fade-in
-    }, loadingGui)
-
-    -- Subtle animated gradient backdrop
-    local bgGradient = addGradient(backdrop, C.Bg, Color3.fromRGB(8, 8, 14), 45)
-    local bgGradientTween
-    do
-        bgGradientTween = TweenService:Create(bgGradient, TweenInfo.new(6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {Rotation = 135})
-        trackTween(bgGradientTween)
-        bgGradientTween:Play()
-    end
-
-    -- Content container (everything else parents here, so backdrop fade is independent)
-    local content = new("Frame", {
-        Size = UDim2.new(1, 0, 1, 0),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-    }, loadingGui)
-
-    -- Logo block
-    local logoSize = 72
-    local logoFrame = new("Frame", {
-        Size = UDim2.fromOffset(logoSize * 0.6, logoSize * 0.6),
-        Position = UDim2.new(0.5, 0, 0.32, 0),
-        BackgroundColor3 = C.Accent,
-        BorderSizePixel = 0,
-        BackgroundTransparency = 1, -- fade-in
-        AnchorPoint = Vector2.new(0.5, 0.5),
-    }, content)
-    addCorner(logoFrame, 18)
-    local logoGrad = addGradient(logoFrame, C.Accent, C.Accent2, 135)
-
-    -- Glow behind logo
-    local logoGlow = new("ImageLabel", {
-        Size = UDim2.fromOffset(logoSize * 2.2, logoSize * 2.2),
-        Position = UDim2.new(0.5, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundTransparency = 1,
-        Image = "rbxassetid://5028857084", -- soft glow
-        ImageColor3 = C.Glow,
-        ImageTransparency = 0.6,
-        ScaleType = Enum.ScaleType.Fit,
-        ZIndex = 0,
-    }, logoFrame)
-
-    local logoText = new("TextLabel", {
-        Size = UDim2.new(1, 0, 1, 0),
-        BackgroundTransparency = 1,
-        Text = "C",
-        TextColor3 = C.White,
-        Font = Enum.Font.GothamBlack,
-        TextSize = 40,
-        TextTransparency = 1,
-    }, logoFrame)
-
-    -- Spinner ring around logo
-    local spinner = new("Frame", {
-        Size = UDim2.fromOffset(logoSize + 14, logoSize + 14),
-        Position = UDim2.new(0.5, 0, 0.32, 0),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        AnchorPoint = Vector2.new(0.5, 0.5),
-    }, content)
-    local spinnerStroke = Instance.new("UIStroke")
-    spinnerStroke.Color = C.Accent
-    spinnerStroke.Thickness = 2
-    spinnerStroke.Transparency = 0.4
-    spinnerStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    spinnerStroke.Parent = spinner
-    addCorner(spinner, 100)
-    -- Make spinner an arc via gradient transparency
-    local spinnerGrad = Instance.new("UIGradient")
-    spinnerGrad.Transparency = NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0),
-        NumberSequenceKeypoint.new(0.3, 0.2),
-        NumberSequenceKeypoint.new(1, 1),
-    })
-    spinnerGrad.Parent = spinnerStroke
-
-    -- Rotation animation for spinner
-    local spinConn
-    do
-        local angle = 0
-        spinConn = trackConn(RunService.RenderStepped:Connect(function(dt)
-            if destroyed then return end
-            angle = (angle + dt * 220) % 360
-            spinner.Rotation = angle
-        end))
-    end
-
-    -- Pulse animation for logo glow
-    local glowTween = trackTween(TweenService:Create(logoGlow, TweenInfo.new(1.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {ImageTransparency = 0.85, Size = UDim2.fromOffset(logoSize * 2.6, logoSize * 2.6)}))
-    glowTween:Play()
-
-    -- Title
-    local title = new("TextLabel", {
-        Size = UDim2.new(0, 240, 0, 34),
-        Position = UDim2.new(0.5, -120, 0.46, 0),
-        BackgroundTransparency = 1,
-        Text = "C-HUB",
-        TextColor3 = C.Text,
-        Font = Enum.Font.GothamBlack,
-        TextSize = 28,
-        TextTransparency = 1,
-    }, content)
-
-    -- Subtitle
-    local sub = new("TextLabel", {
-        Size = UDim2.new(0, 260, 0, 18),
-        Position = UDim2.new(0.5, -130, 0.52, 0),
-        BackgroundTransparency = 1,
-        Text = "Initializing Systems...",
-        TextColor3 = C.Muted,
-        Font = Enum.Font.GothamMedium,
-        TextSize = 13,
-        TextTransparency = 1,
-    }, content)
-
-    -- Progress Bar Container
-    local barWidth = 320
-    local barContainer = new("Frame", {
-        Size = UDim2.fromOffset(barWidth, 8),
-        Position = UDim2.new(0.5, -barWidth / 2, 0.62, 0),
-        BackgroundColor3 = C.Surface,
-        BorderSizePixel = 0,
-        BackgroundTransparency = 1,
-    }, content)
-    addCorner(barContainer, 4)
-    addStroke(barContainer, C.Surface, 1, 0.6)
-
-    -- Progress Bar Fill
-    local barFill = new("Frame", {
-        Size = UDim2.new(0, 0, 1, 0),
-        BackgroundColor3 = C.Accent,
-        BorderSizePixel = 0,
-    }, barContainer)
-    addCorner(barFill, 4)
-    local fillGrad = addGradient(barFill, C.Accent, C.Accent2, 0)
-
-    -- Shimmer on fill
-    local shimmer = new("Frame", {
-        Size = UDim2.new(0, 40, 1, 0),
-        Position = UDim2.new(-0.2, 0, 0, 0),
-        BackgroundColor3 = C.White,
-        BackgroundTransparency = 0.75,
-        BorderSizePixel = 0,
-    }, barFill)
-    addCorner(shimmer, 4)
-    local shimmerTween = trackTween(TweenService:Create(shimmer, TweenInfo.new(1.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Position = UDim2.new(1.2, 0, 0, 0)}))
-    shimmerTween:Play()
-
-    -- Percentage text
-    local pctLabel = new("TextLabel", {
-        Size = UDim2.new(0, 60, 0, 16),
-        Position = UDim2.new(0.5, -30, 0.62, 14),
-        BackgroundTransparency = 1,
-        Text = "0%",
-        TextColor3 = C.Muted,
-        Font = Enum.Font.GothamBold,
-        TextSize = 11,
-        TextTransparency = 1,
-    }, content)
-
-    -- Status text
-    local statusLabel = new("TextLabel", {
-        Size = UDim2.new(0, barWidth, 0, 16),
-        Position = UDim2.new(0.5, -barWidth / 2, 0.68, 0),
-        BackgroundTransparency = 1,
-        Text = "Scanning Workspace...",
-        TextColor3 = C.Muted,
-        Font = Enum.Font.GothamMedium,
-        TextSize = 11,
-        TextTransparency = 1,
-        TextXAlignment = Enum.TextXAlignment.Center,
-    }, content)
-
-    -- Footer hint
-    local footer = new("TextLabel", {
-        Size = UDim2.new(0, 260, 0, 14),
-        Position = UDim2.new(0.5, -130, 0.92, 0),
-        BackgroundTransparency = 1,
-        Text = "C-HUB  •  Loading",
-        TextColor3 = C.Muted,
-        Font = Enum.Font.GothamMedium,
-        TextSize = 10,
-        TextTransparency = 1,
-    }, content)
-
-    -- Completion overlay (hidden until done)
-    local checkFrame = new("Frame", {
-        Size = UDim2.fromOffset(44, 44),
-        Position = UDim2.new(0.5, -22, 0.32, -22),
-        BackgroundColor3 = Color3.fromRGB(34, 197, 94),
-        BorderSizePixel = 0,
-        BackgroundTransparency = 1,
-        Visible = false,
-    }, content)
-    addCorner(checkFrame, 22)
-    local checkText = new("TextLabel", {
-        Size = UDim2.new(1, 0, 1, 0),
-        BackgroundTransparency = 1,
-        Text = "✓",
-        TextColor3 = C.White,
-        Font = Enum.Font.GothamBlack,
-        TextSize = 26,
-        TextTransparency = 1,
-    }, checkFrame)
-
-    -- Entrance animation
-    local function playEntrance()
-        TweenService:Create(backdrop, FADE, {BackgroundTransparency = 0}):Play()
-        task.delay(0.05, function()
-            if destroyed then return end
-            local t1 = TweenService:Create(logoFrame, BOUNCE, {BackgroundTransparency = 0, Size = UDim2.fromOffset(logoSize, logoSize)})
-            local t2 = TweenService:Create(logoText, FADE, {TextTransparency = 0})
-            local t3 = TweenService:Create(title, FADE, {TextTransparency = 0})
-            local t4 = TweenService:Create(sub, FADE, {TextTransparency = 0})
-            local t5 = TweenService:Create(barContainer, FADE, {BackgroundTransparency = 0})
-            local t6 = TweenService:Create(pctLabel, FADE, {TextTransparency = 0})
-            local t7 = TweenService:Create(statusLabel, FADE, {TextTransparency = 0})
-            local t8 = TweenService:Create(footer, FADE, {TextTransparency = 0})
-            for _, t in ipairs({t1, t2, t3, t4, t5, t6, t7, t8}) do t:Play() end
-        end)
-    end
-    playEntrance()
-
-    -- Internal state
-    local currentPct = 0
-    local completed = false
-
-    local api = {}
-
-    function api.setProgress(pct, message)
-        if destroyed then return end
-        pct = math.clamp(tonumber(pct) or 0, 0, 1)
-        currentPct = pct
-        TweenService:Create(barFill, SMOOTH, {Size = UDim2.new(pct, 0, 1, 0)}):Play()
-        pctLabel.Text = math.floor(pct * 100 + 0.5) .. "%"
-        if message then statusLabel.Text = tostring(message) end
-
-        -- Completion handling
-        if pct >= 1 and not completed then
-            completed = true
-            statusLabel.Text = message or "Complete"
-            -- Hide spinner, show check
-            spinner.Visible = false
-            checkFrame.Visible = true
-            checkFrame.BackgroundTransparency = 1
-            checkText.TextTransparency = 1
-            TweenService:Create(checkFrame, BOUNCE, {BackgroundTransparency = 0}):Play()
-            TweenService:Create(checkText, FADE, {TextTransparency = 0}):Play()
-            TweenService:Create(logoFrame, SMOOTH, {BackgroundColor3 = Color3.fromRGB(34, 197, 94)}):Play()
-            -- Shimmer stop
-            pcall(function() shimmerTween:Cancel() end)
-        end
-    end
-
-    function api.setStatus(message)
-        if destroyed then return end
-        if message then statusLabel.Text = tostring(message) end
-    end
-
-    function api.destroy()
-        if destroyed then return end
-        destroyed = true
-        -- Cancel loops
-        if spinConn then pcall(function() spinConn:Disconnect() end) end
-        if bgGradientTween then pcall(function() bgGradientTween:Cancel() end) end
-        if glowTween then pcall(function() glowTween:Cancel() end) end
-        if shimmerTween then pcall(function() shimmerTween:Cancel() end) end
-        for _, t in ipairs(tweens) do pcall(function() t:Cancel() end) end
-
-        -- Fade out everything
-        local fadeTargets = {backdrop, logoFrame, logoText, title, sub, barContainer, pctLabel, statusLabel, footer, checkFrame, checkText}
-        for _, obj in ipairs(fadeTargets) do
-            if obj and obj.Parent then
-                local props = {}
-                if obj:IsA("Frame") or obj:IsA("ImageLabel") then
-                    props.BackgroundTransparency = 1
-                end
-                if obj:IsA("TextLabel") or obj:IsA("TextButton") then
-                    props.TextTransparency = 1
-                end
-                if obj:IsA("ImageLabel") then
-                    props.ImageTransparency = 1
-                end
-                pcall(function() TweenService:Create(obj, FADE, props):Play() end)
-            end
-        end
-        task.wait(0.38)
-        pcall(function() loadingGui:Destroy() end)
-        if onComplete then pcall(onComplete) end
-    end
-
-    -- Expose for external cleanup safety
-    loadingGui.Destroying:Connect(function()
-        destroyed = true
-    end)
-
-    return api
-end
-
--- ============================================================
---  LOADING SCREEN  (runs first, gates main UI reveal)
--- ============================================================
-local loaderDone = false
-local loaderReveal = nil
-local function onLoaderComplete()
-    loaderDone = true
-    if loaderReveal then loaderReveal() end
-end
-local loader = createLoadingScreen(onLoaderComplete)
-
-task.spawn(function()
-    if not loader then return end
-    task.wait(0.15)
-    pcall(function() loader.setProgress(0.2, "Initializing Services...") end)
-    task.wait(0.35)
-    pcall(function() loader.setProgress(0.45, "Scanning Workspace...") end)
-    task.wait(0.35)
-    pcall(function() loader.setProgress(0.7, "Building Interface...") end)
-    task.wait(0.35)
-    pcall(function() loader.setProgress(1.0, "Ready") end)
-    task.wait(0.5)
-    pcall(function() loader.destroy() end)
-end)
 
 local PALETTE = {
     Color3.fromRGB(255, 255, 255),   -- White
@@ -1449,20 +1016,13 @@ local winStroke = stroke(win, "Border", 1)
 win.BackgroundTransparency = 1
 win.Size = UDim2.fromOffset(WIN_W * 0.85, WIN_H * 0.85)
 win.Position = UDim2.new(0.5, -WIN_W * 0.425, 0.2, 10)
-win.Visible = false
-
-local function revealWin()
-    win.Visible = true
-    win.BackgroundTransparency = 1
-    win.Size = UDim2.fromOffset(WIN_W * 0.85, WIN_H * 0.85)
-    win.Position = UDim2.new(0.5, -WIN_W * 0.425, 0.2, 10)
+task.delay(0.05, function()
     TweenService:Create(win, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
         BackgroundTransparency = 0,
         Size = UDim2.fromOffset(WIN_W, WIN_H),
         Position = UDim2.new(0.5, -WIN_W/2, 0.2, 0),
     }):Play()
-end
-if loaderDone then revealWin() else loaderReveal = revealWin end
+end)
 
 task.spawn(function()
     while task.wait(3) do
@@ -1574,6 +1134,142 @@ end
 local closeBtn = winBtn("×", 38, Color3.fromRGB(235, 70, 70))
 local minBtn   = winBtn("–", 70, C.Accent)
 
+-- ══════════════════════════════════════════════
+--  IN-WINDOW LOADING OVERLAY
+-- ══════════════════════════════════════════════
+local loadOverlay = Instance.new("Frame")
+loadOverlay.Name = "LoadOverlay"
+loadOverlay.Size = UDim2.new(1, 0, 1, -TITLE_H)
+loadOverlay.Position = UDim2.new(0, 0, 0, TITLE_H)
+loadOverlay.BorderSizePixel = 0
+loadOverlay.ZIndex = 50
+loadOverlay.Parent = win
+bind(loadOverlay, "BackgroundColor3", "Bg")
+
+local loadLogo = Instance.new("ImageLabel")
+loadLogo.Size = UDim2.fromOffset(64, 64)
+loadLogo.Position = UDim2.new(0.5, -32, 0.22, 0)
+loadLogo.BackgroundTransparency = 1
+loadLogo.BorderSizePixel = 0
+loadLogo.ScaleType = Enum.ScaleType.Fit
+loadLogo.Image = logo.Image
+loadLogo.Parent = loadOverlay
+bind(loadLogo, "ImageColor3", "Logo")
+
+local loadSpinner = Instance.new("Frame")
+loadSpinner.Size = UDim2.fromOffset(80, 80)
+loadSpinner.Position = UDim2.new(0.5, -40, 0.22, -8)
+loadSpinner.BackgroundTransparency = 1
+loadSpinner.BorderSizePixel = 0
+loadSpinner.Parent = loadOverlay
+local spStroke = Instance.new("UIStroke")
+spStroke.Color = C.Accent
+spStroke.Thickness = 2
+spStroke.Transparency = 0.4
+spStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+spStroke.Parent = loadSpinner
+corner(loadSpinner, 40)
+local spGrad = Instance.new("UIGradient")
+spGrad.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.3, 0.2), NumberSequenceKeypoint.new(1, 1)})
+spGrad.Parent = spStroke
+local spinTween = TweenService:Create(loadSpinner, TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Rotation = 360})
+spinTween:Play()
+
+local loadTitle = label(loadOverlay, "C-HUB", 22, "Text", Enum.Font.GothamBlack)
+loadTitle.Size = UDim2.new(1, 0, 0, 28)
+loadTitle.Position = UDim2.new(0, 0, 0.42, 0)
+loadTitle.TextXAlignment = Enum.TextXAlignment.Center
+
+local loadSub = label(loadOverlay, "Initializing Systems...", 12, "Muted", Enum.Font.GothamMedium)
+loadSub.Size = UDim2.new(1, 0, 0, 16)
+loadSub.Position = UDim2.new(0, 0, 0.5, 0)
+loadSub.TextXAlignment = Enum.TextXAlignment.Center
+
+local loadBarW = 280
+local loadBarContainer = Instance.new("Frame")
+loadBarContainer.Size = UDim2.fromOffset(loadBarW, 8)
+loadBarContainer.Position = UDim2.new(0.5, -loadBarW / 2, 0.62, 0)
+loadBarContainer.BorderSizePixel = 0
+loadBarContainer.Parent = loadOverlay
+bind(loadBarContainer, "BackgroundColor3", "Surface")
+corner(loadBarContainer, 4)
+
+local loadBarFill = Instance.new("Frame")
+loadBarFill.Size = UDim2.new(0, 0, 1, 0)
+loadBarFill.BorderSizePixel = 0
+loadBarFill.Parent = loadBarContainer
+bind(loadBarFill, "BackgroundColor3", "Accent")
+corner(loadBarFill, 4)
+local loadFillGrad = Instance.new("UIGradient")
+loadFillGrad.Color = ColorSequence.new(C.Accent, C.Accent2 or C.Accent)
+loadFillGrad.Parent = loadBarFill
+
+local loadShimmer = Instance.new("Frame")
+loadShimmer.Size = UDim2.new(0, 40, 1, 0)
+loadShimmer.Position = UDim2.new(-0.2, 0, 0, 0)
+loadShimmer.BackgroundTransparency = 0.75
+loadShimmer.BorderSizePixel = 0
+loadShimmer.Parent = loadBarFill
+bind(loadShimmer, "BackgroundColor3", "White")
+corner(loadShimmer, 4)
+local loadShimmerTween = TweenService:Create(loadShimmer, TweenInfo.new(1.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Position = UDim2.new(1.2, 0, 0, 0)})
+loadShimmerTween:Play()
+
+local loadPct = label(loadOverlay, "0%", 11, "Muted", Enum.Font.GothamBold)
+loadPct.Size = UDim2.new(1, 0, 0, 16)
+loadPct.Position = UDim2.new(0, 0, 0.62, 14)
+loadPct.TextXAlignment = Enum.TextXAlignment.Center
+
+local loadStatus = label(loadOverlay, "Scanning Workspace...", 11, "Muted", Enum.Font.GothamMedium)
+loadStatus.Size = UDim2.new(1, 0, 0, 16)
+loadStatus.Position = UDim2.new(0, 0, 0.68, 0)
+loadStatus.TextXAlignment = Enum.TextXAlignment.Center
+
+local loadFooter = label(loadOverlay, "C-HUB  •  Loading", 10, "Muted", Enum.Font.GothamMedium)
+loadFooter.Size = UDim2.new(1, 0, 0, 14)
+loadFooter.Position = UDim2.new(0, 0, 0.9, 0)
+loadFooter.TextXAlignment = Enum.TextXAlignment.Center
+
+local function setLoadProgress(pct, msg)
+    pct = math.clamp(pct, 0, 1)
+    TweenService:Create(loadBarFill, SMOOTH, {Size = UDim2.new(pct, 0, 1, 0)}):Play()
+    loadPct.Text = math.floor(pct * 100 + 0.5) .. "%"
+    if msg then loadStatus.Text = msg end
+    if pct >= 1 then
+        pcall(function() spinTween:Cancel() end)
+        loadSpinner.Visible = false
+        loadStatus.Text = msg or "Ready"
+        TweenService:Create(loadLogo, SMOOTH, {ImageColor3 = Color3.fromRGB(34, 197, 94)}):Play()
+        pcall(function() loadShimmerTween:Cancel() end)
+    end
+end
+
+task.spawn(function()
+    task.wait(0.15)
+    setLoadProgress(0.2, "Initializing Services...")
+    task.wait(0.35)
+    setLoadProgress(0.45, "Scanning Workspace...")
+    task.wait(0.35)
+    setLoadProgress(0.7, "Building Interface...")
+    task.wait(0.35)
+    setLoadProgress(1.0, "Ready")
+    task.wait(0.6)
+    local fadeInfo = TweenInfo.new(0.35, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+    TweenService:Create(loadOverlay, fadeInfo, {BackgroundTransparency = 1}):Play()
+    for _, o in ipairs({loadLogo, loadTitle, loadSub, loadBarContainer, loadPct, loadStatus, loadFooter, loadSpinner}) do
+        pcall(function()
+            if o:IsA("TextLabel") then TweenService:Create(o, fadeInfo, {TextTransparency = 1}):Play() end
+            if o:IsA("Frame") or o:IsA("ImageLabel") then TweenService:Create(o, fadeInfo, {BackgroundTransparency = 1}):Play() end
+            if o:IsA("ImageLabel") then TweenService:Create(o, fadeInfo, {ImageTransparency = 1}):Play() end
+        end)
+    end
+    task.wait(0.38)
+    loadOverlay:Destroy()
+    tabBar.Visible = true
+    content.Visible = true
+    footer.Visible = true
+end)
+
 -- ═══ TABS (segmented control) ═══
 local TAB_NAMES = {"AIM", "ESP", "STYLE", "INFO"}
 local currentTab = 1
@@ -1582,6 +1278,7 @@ local tabBtns, tabPages = {}, {}
 local tabBar = Instance.new("Frame")
 tabBar.Size = UDim2.new(1, -24, 0, TAB_H); tabBar.Position = UDim2.new(0, 12, 0, TITLE_H + 10)
 tabBar.BorderSizePixel = 0; tabBar.Parent = win
+tabBar.Visible = false
 bind(tabBar, "BackgroundColor3", "Surface"); corner(tabBar, 9); stroke(tabBar, "Border", 1)
 
 local tabIndicator = Instance.new("Frame")
@@ -1594,11 +1291,13 @@ local content = Instance.new("Frame")
 content.Size = UDim2.new(1, -24, 1, -(CONTENT_Y + FOOT_H + 4))
 content.Position = UDim2.new(0, 12, 0, CONTENT_Y)
 content.BackgroundTransparency = 1; content.ClipsDescendants = true; content.Parent = win
+content.Visible = false
 
 -- footer: live status chips + a one-line event log
 local footer = Instance.new("Frame")
 footer.Size = UDim2.new(1, 0, 0, FOOT_H); footer.Position = UDim2.new(0, 0, 1, -FOOT_H)
 footer.BorderSizePixel = 0; footer.Parent = win
+footer.Visible = false
 bind(footer, "BackgroundColor3", "Surface")
 do
     local topLine = Instance.new("Frame")
